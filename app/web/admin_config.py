@@ -332,7 +332,7 @@ class OrderAdmin(ModelView, model=Order):
         Order.status,
         Order.created_at,
         Order.items,  # 🛒 Товары
-        Order.status_history  # 📜 История
+        #Order.status_history  # 📜 История
     ]
 
     # ❌ УБИРАЕМ column_formatters_detail — пусть SQLAdmin форматирует сам!
@@ -381,7 +381,7 @@ def format_history_list(history) -> str:
 # ============================================================================
 
 ADMIN_VIEWS = [
-    StatsAdmin,  # 📊 Сводная
+    #StatsAdmin,  # 📊 Сводная
     # StatsDailyAdmin,  # 📅 По дням
     # StatsProductsAdmin,  # 🏆 Товары
     UserAdmin,
