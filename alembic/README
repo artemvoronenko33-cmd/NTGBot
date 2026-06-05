@@ -1,0 +1,7 @@
+Generic single-database configuration.
+
+docker compose exec postgres psql -U botuser -d botdb -c "UPDATE products SET price = 1;"
+
+docker compose exec postgres psql -U botuser -d botdb -c "SELECT name, price FROM products;"
+
+UPDATE products SET price = X WHERE id = Y;  Быстрая правка 1-2 товаров через PowerShell
