@@ -28,8 +28,8 @@ def cabinet_kb():
     """Inline клавиатура для Личного кабинета"""
     builder = InlineKeyboardBuilder()
     builder.button(text="📦 Мои заказы", callback_data="my_orders")
-    builder.button(text="👥 Рефералы", callback_data="referrals")
-    builder.button(text="⚙️ Настройки", callback_data="settings")
+    #builder.button(text="👥 Рефералы", callback_data="referrals")
+    #builder.button(text="⚙️ Настройки", callback_data="settings")
     builder.adjust(1)
     return builder.as_markup()
 
