@@ -13,6 +13,7 @@ from app.bot.keyboards import (
     main_menu_kb, categories_kb, products_kb, product_detail_kb,
     cart_view_kb, checkout_confirm_kb, payment_link_kb,
     balance_kb, cancel_topup_kb, topup_currency_kb, TOPUP_CURRENCIES,
+    cabinet_kb,
 )
 from app.bot.states import TopUpStates
 from app.db.models import User, Category, Product, Order, OrderItem, Payment, TopUp
@@ -26,7 +27,7 @@ from app.bot.bot_instance import bot
 from app.services.balance import (
     check_rate_limit,
     record_transaction,
-    get_user_balance_history,  # ← добавлено
+    get_user_balance_history,
     TransactionType
 )
 
@@ -47,13 +48,10 @@ def _make_qr(data: str) -> bytes:
 @router.message(F.text == "👤 Личный кабинет")
 async def personal_cabinet(message: Message):
     async with async_session() as session:
-        stmt = select(User).where(User.id == message.from_user.id)
-        result = await session.execute(stmt)
-        user = result.scalar_one_or_none()
-
-        # Подсчёт заказов
-        order_stmt = select(func.count(Order.id)).where(Order.user_id == message.from_user.id)
-        orders_count = (await session.execute(order_stmt)).scalar() or 0
+        user = await session.get(User, message.from_user.id)
+        order_count = (await session.execute(
+            select(func.count(Order.id)).where(Order.user_id == message.from_user.id)
+        )).scalar() or 0
 
     if not user:
         await message.answer("❌ Профиль не найден. Напишите /start")
@@ -62,13 +60,62 @@ async def personal_cabinet(message: Message):
     text = (
         f"👤 <b>Личный кабинет</b>\n\n"
         f"🆔 ID: <code>{user.id}</code>\n"
-        f"👤 Username: @{user.username or 'нет'}\n"
-        f"💰 Баланс: <b>${(user.balance / 100):.2f}</b>\n"
-        f"📦 Заказов: <b>{orders_count}</b>\n"
-        f"📅 Зарегистрирован: {user.created_at.strftime('%d.%m.%Y %H:%M')}\n"
+        f"👤 @{user.username or 'нет'}\n"
+        f"💰 Баланс: <b>${user.balance / 100:.2f}</b>\n"
+        f"📦 Заказов: <b>{order_count}</b>\n"
+        f"📅 Регистрация: {user.created_at.strftime('%d.%m.%Y')}\n"
     )
 
-    await message.answer(text, parse_mode="HTML", reply_markup=main_menu_kb)
+    await message.answer(text, parse_mode="HTML", reply_markup=cabinet_kb())
+
+
+# ==================== Мои заказы ====================
+@router.callback_query(F.data == "my_orders")
+async def my_orders(callback: CallbackQuery):
+    async with async_session() as session:
+        orders = (await session.execute(
+            select(Order)
+            .where(Order.user_id == callback.from_user.id)
+            .order_by(Order.created_at.desc())
+            .limit(10)
+        )).scalars().all()
+
+    if not orders:
+        await callback.message.edit_text("📭 У вас пока нет заказов.", reply_markup=cabinet_kb())
+        await callback.answer()
+        return
+
+    text = "📦 <b>Ваши последние заказы</b>\n\n"
+    for order in orders:
+        status_emoji = {"pending": "⏳", "paid": "✅", "completed": "✅", "cancelled": "❌", "refunded": "♻️"}.get(order.status, "❓")
+        text += (
+            f"{status_emoji} <b>Заказ #{order.id}</b>\n"
+            f"💰 Сумма: ${order.total_price:.2f}\n"
+            f"📅 {order.created_at.strftime('%d.%m.%Y %H:%M')}\n"
+            f"📝 Статус: {order.status}\n\n"
+        )
+
+    await callback.message.edit_text(text, parse_mode="HTML", reply_markup=cabinet_kb())
+    await callback.answer()
+
+
+# ==================== Рефералы ====================
+@router.callback_query(F.data == "referrals")
+async def referrals(callback: CallbackQuery):
+    await callback.answer("👥 Раздел рефералов в разработке...", show_alert=True)
+
+
+# ==================== Настройки ====================
+@router.callback_query(F.data == "settings")
+async def settings(callback: CallbackQuery):
+    await callback.answer("⚙️ Настройки в разработке...", show_alert=True)
+
+
+# ==================== Назад в меню ====================
+@router.callback_query(F.data == "back_to_menu")
+async def back_to_menu(callback: CallbackQuery):
+    await callback.message.edit_text("Главное меню", reply_markup=main_menu_kb)
+    await callback.answer()
 
 
 # ==================== /start ====================
