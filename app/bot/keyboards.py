@@ -1,5 +1,5 @@
 # app/bot/keyboards.py
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardBuilder
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from typing import List
 from config import settings
@@ -30,7 +30,6 @@ def cabinet_kb():
     builder.button(text="📦 Мои заказы", callback_data="my_orders")
     builder.button(text="👥 Рефералы", callback_data="referrals")
     builder.button(text="⚙️ Настройки", callback_data="settings")
-    builder.button(text="← Назад в меню", callback_data="back_to_menu")
     builder.adjust(1)
     return builder.as_markup()
 

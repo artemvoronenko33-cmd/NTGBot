@@ -111,13 +111,6 @@ async def settings(callback: CallbackQuery):
     await callback.answer("⚙️ Настройки в разработке...", show_alert=True)
 
 
-# ==================== Назад в меню ====================
-@router.callback_query(F.data == "back_to_menu")
-async def back_to_menu(callback: CallbackQuery):
-    await callback.message.edit_text("Главное меню", reply_markup=main_menu_kb)
-    await callback.answer()
-
-
 # ==================== /start ====================
 @router.message(Command("start"))
 async def cmd_start(message: Message, state: FSMContext):
