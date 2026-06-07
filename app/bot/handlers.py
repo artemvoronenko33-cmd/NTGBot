@@ -7,7 +7,7 @@ from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery, BufferedInputFile
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
-from sqlalchemy import select, update
+from sqlalchemy import select, update, func
 
 from app.bot.keyboards import (
     main_menu_kb, categories_kb, products_kb, product_detail_kb,
@@ -43,7 +43,32 @@ def _make_qr(data: str) -> bytes:
     img.save(buf, format="PNG")
     return buf.getvalue()
 
-router = Router()
+# ==================== Личный кабинет ====================
+@router.message(F.text == "👤 Личный кабинет")
+async def personal_cabinet(message: Message):
+    async with async_session() as session:
+        stmt = select(User).where(User.id == message.from_user.id)
+        result = await session.execute(stmt)
+        user = result.scalar_one_or_none()
+
+        # Подсчёт заказов
+        order_stmt = select(func.count(Order.id)).where(Order.user_id == message.from_user.id)
+        orders_count = (await session.execute(order_stmt)).scalar() or 0
+
+    if not user:
+        await message.answer("❌ Профиль не найден. Напишите /start")
+        return
+
+    text = (
+        f"👤 <b>Личный кабинет</b>\n\n"
+        f"🆔 ID: <code>{user.id}</code>\n"
+        f"👤 Username: @{user.username or 'нет'}\n"
+        f"💰 Баланс: <b>${(user.balance / 100):.2f}</b>\n"
+        f"📦 Заказов: <b>{orders_count}</b>\n"
+        f"📅 Зарегистрирован: {user.created_at.strftime('%d.%m.%Y %H:%M')}\n"
+    )
+
+    await message.answer(text, parse_mode="HTML", reply_markup=main_menu_kb)
 
 
 # ==================== /start ====================
