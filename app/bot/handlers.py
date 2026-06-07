@@ -100,15 +100,15 @@ async def my_orders(callback: CallbackQuery):
 
 
 # ==================== Рефералы ====================
-@router.callback_query(F.data == "referrals")
-async def referrals(callback: CallbackQuery):
-    await callback.answer("👥 Раздел рефералов в разработке...", show_alert=True)
+#@router.callback_query(F.data == "referrals")
+#async def referrals(callback: CallbackQuery):
+#    await callback.answer("👥 Раздел рефералов в разработке...", show_alert=True)
 
 
 # ==================== Настройки ====================
-@router.callback_query(F.data == "settings")
-async def settings(callback: CallbackQuery):
-    await callback.answer("⚙️ Настройки в разработке...", show_alert=True)
+#@router.callback_query(F.data == "settings")
+#async def settings(callback: CallbackQuery):
+#    await callback.answer("⚙️ Настройки в разработке...", show_alert=True)
 
 
 # ==================== /start ====================
