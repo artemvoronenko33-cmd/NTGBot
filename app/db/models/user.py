@@ -16,6 +16,6 @@ class User(Base):
         return f"{self.username or 'Без имени'} (ID: {self.id})"
     # В конец класса User добавь:
     is_worker = Column(Boolean, default=False, server_default='false')
-    worker_notes = Column(String(255), nullable=True)  # например, "Основной поставщик"
+    worker_notes = Column(String(255), nullable=True)  # например, "Основной поставщикff"
  
     
