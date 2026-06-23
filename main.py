@@ -9,7 +9,7 @@ from app.bot.handlers import router
 from app.web.app import create_app
 from config import settings
 
-
+from app.bot.handlers_worker import router as worker_router
 
 logging.basicConfig(
     level=logging.INFO,
@@ -20,6 +20,7 @@ logging.basicConfig(
 async def run_bot() -> None:
     dp = Dispatcher()
     dp.include_router(router)
+    dp.include_router(worker_router)
     logging.info("Бот запущен...")
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)

@@ -4,6 +4,8 @@ from aiogram.utils.keyboard import InlineKeyboardBuilder
 from typing import List
 from config import settings
 
+from aiogram.utils.keyboard import ReplyKeyboardBuilder
+
 # Главное меню (Reply — кнопки внизу экрана)
 main_menu_kb = ReplyKeyboardMarkup(
     keyboard=[
@@ -114,3 +116,18 @@ def admin_order_kb(order_id: int, is_paid: bool) -> InlineKeyboardMarkup:
             callback_data=f"refund_order_{order_id}"
         )
     return builder.as_markup()
+
+def get_worker_menu() -> ReplyKeyboardMarkup:
+    builder = ReplyKeyboardBuilder()
+    builder.button(text="📤 Загрузить аккаунты")
+    builder.button(text="📊 Мои загруженные аккаунты")
+    builder.button(text="🔙 Вернуться в главное меню")
+    builder.adjust(1)
+    return builder.as_markup(resize_keyboard=True)
+
+
+def get_cancel_kb() -> ReplyKeyboardMarkup:
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text="❌ Отмена")]],
+        resize_keyboard=True
+    )
