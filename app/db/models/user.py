@@ -13,6 +13,9 @@ class User(Base):
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())   
     def __repr__(self):
-        return f"{self.username or 'Без имени'} (ID: {self.id})" 
+        return f"{self.username or 'Без имени'} (ID: {self.id})"
+    # В конец класса User добавь:
+    is_worker = Column(Boolean, default=False, server_default='false')
+    worker_notes = Column(String(255), nullable=True)  # например, "Основной поставщик"
  
     
