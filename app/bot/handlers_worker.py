@@ -6,9 +6,9 @@ from aiogram.fsm.context import FSMContext
 from sqlalchemy.ext.asyncio import AsyncSession
 from app.db.models import User, AccountItem, Product
 from app.services import storage_service
-from app.bot.states.worker_states import WorkerStates
-from app.bot.keyboards.worker_kb import get_worker_menu, get_cancel_kb
-from app.db.session import get_db
+from app.bot.states import WorkerStates
+from app.bot.keyboards import get_worker_menu, get_cancel_kb
+
 
 router = Router()
 
