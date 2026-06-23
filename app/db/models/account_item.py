@@ -42,7 +42,7 @@ class AccountItem(Base):
 
     # Связи
     product = relationship("Product", back_populates="account_items")
-    order = relationship("Order", back_populates="reserved_items", foreign_keys=[reserved_for_order_id])
+    
 
     def __repr__(self):
         return f"<AccountItem {self.id} | {self.account_name} | {self.status.value}>"

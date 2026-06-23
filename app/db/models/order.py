@@ -1,5 +1,5 @@
 # app/db/models/order.py
-from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey, func
+from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey, func, BigInteger
 from sqlalchemy.orm import relationship
 from app.db.base import Base
 from datetime import datetime
@@ -8,8 +8,8 @@ from datetime import datetime
 class Order(Base):
     __tablename__ = "orders"
 
-    id = Column(Integer, primary_key=True, autoincrement=True)
-    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    user_id = Column(BigInteger, ForeignKey("users.id"), nullable=False)
     total_price = Column(Float, default=0.0)
     status = Column(String(50), default="created")
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -19,12 +19,18 @@ class Order(Base):
     items = relationship("OrderItem", cascade="all, delete-orphan")
     status_history = relationship("OrderStatusHistory", cascade="all, delete-orphan")
 
-    items = relationship("OrderItem", back_populates="order", cascade="all, delete-orphan")
+    reserved_items = relationship(
+        "AccountItem",
+        back_populates=None,  # пока None, т.к. мы убрали с той стороны
+        foreign_keys="AccountItem.reserved_for_order_id",
+        lazy="selectin"
+    )
+    #items = relationship("OrderItem", back_populates="order", cascade="all, delete-orphan")
 
 class OrderItem(Base):
     __tablename__ = "order_items"
-    id = Column(Integer, primary_key=True)
-    order_id = Column(Integer, ForeignKey("orders.id"), nullable=False)
+    id = Column(BigInteger, primary_key=True)
+    order_id = Column(BigInteger, ForeignKey("orders.id"), nullable=False)
     product_id = Column(Integer, ForeignKey("products.id"), nullable=False)
 
     # ✅ НОВОЕ ПОЛЕ: название товара на момент покупки
@@ -34,7 +40,6 @@ class OrderItem(Base):
     price_at_purchase = Column(Float, nullable=False)
 
     product = relationship("Product")
-    order = relationship("Order", back_populates="items")
 
     # ✅ Теперь это безопасно работает!
     def __repr__(self):
