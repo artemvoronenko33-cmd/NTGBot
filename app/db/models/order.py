@@ -19,6 +19,7 @@ class Order(Base):
     items = relationship("OrderItem", cascade="all, delete-orphan")
     status_history = relationship("OrderStatusHistory", cascade="all, delete-orphan")
 
+    items = relationship("OrderItem", back_populates="order", cascade="all, delete-orphan")
 
 class OrderItem(Base):
     __tablename__ = "order_items"
@@ -33,6 +34,7 @@ class OrderItem(Base):
     price_at_purchase = Column(Float, nullable=False)
 
     product = relationship("Product")
+    order = relationship("Order", back_populates="items")
 
     # ✅ Теперь это безопасно работает!
     def __repr__(self):

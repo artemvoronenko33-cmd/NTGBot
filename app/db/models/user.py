@@ -1,5 +1,5 @@
 # app/db/models/user.py
-from sqlalchemy import Column, BigInteger, String, DateTime, func
+from sqlalchemy import Column, BigInteger, String, Boolean, DateTime, func
 from app.db.base import Base
 
 
