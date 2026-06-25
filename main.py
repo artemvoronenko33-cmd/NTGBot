@@ -11,6 +11,7 @@ from config import settings
 
 from app.db.middleware import DBSessionMiddleware   # ← добавь импорт
 from app.bot.handlers_worker import router as worker_router
+from app.bot.handlers_admin import router as admin_router
 
 logging.basicConfig(
     level=logging.INFO,
@@ -27,6 +28,7 @@ async def run_bot() -> None:
     dp.callback_query.middleware(session_middleware)  # на всякий случай
 
     dp.include_router(router)
+    dp.include_router(admin_router)
     dp.include_router(worker_router)
     logging.info("Бот запущен...")
     await bot.delete_webhook(drop_pending_updates=True)

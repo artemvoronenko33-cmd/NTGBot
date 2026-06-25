@@ -125,6 +125,14 @@ def get_worker_menu() -> ReplyKeyboardMarkup:
     builder.adjust(1)
     return builder.as_markup(resize_keyboard=True)
 
+def get_admin_menu() -> ReplyKeyboardMarkup:
+    builder = ReplyKeyboardBuilder()
+    builder.button(text="📤 Загрузить аккаунты")
+    builder.button(text="📊 Мои загруженные аккаунты")
+    builder.button(text="🔙 Вернуться в главное меню")
+    builder.adjust(1)
+    return builder.as_markup(resize_keyboard=True)
+
 
 def get_cancel_kb() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
