@@ -10,13 +10,13 @@ from app.bot.states import WorkerStates
 from app.bot.keyboards import get_worker_menu, get_cancel_kb
 
 
-router = Router()
+router = Router(name="worker_router")
 
 
 @router.message(Command("worker"))
 async def cmd_worker(message: Message, session: AsyncSession):
     user = await session.get(User, message.from_user.id)
-    if not user or not user.is_worker:
+    if not user or not getattr(user, 'is_worker', False):
         await message.answer("⛔ У вас нет доступа к панели работника.")
         return
 
@@ -46,7 +46,7 @@ async def start_upload_accounts(message: Message, state: FSMContext, session: As
 
 
 @router.message(WorkerStates.waiting_for_category)
-async def process_category(message: Message, state: FSMContext):
+async def process_category(message: Message, state: FSMContext, session: AsyncSession):
     try:
         product_id = int(message.text.strip())
         await state.update_data(product_id=product_id)

@@ -9,6 +9,7 @@ from app.bot.handlers import router
 from app.web.app import create_app
 from config import settings
 
+from app.db.middleware import DBSessionMiddleware   # ← добавь импорт
 from app.bot.handlers_worker import router as worker_router
 
 logging.basicConfig(
@@ -19,6 +20,12 @@ logging.basicConfig(
 
 async def run_bot() -> None:
     dp = Dispatcher()
+
+    # === Middleware ===
+    session_middleware = DBSessionMiddleware()
+    dp.message.middleware(session_middleware)
+    dp.callback_query.middleware(session_middleware)  # на всякий случай
+
     dp.include_router(router)
     dp.include_router(worker_router)
     logging.info("Бот запущен...")
