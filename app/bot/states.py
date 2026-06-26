@@ -7,5 +7,6 @@ class TopUpStates(StatesGroup):
 class WorkerStates(StatesGroup):
     waiting_for_category = State()      # Ожидание выбора категории/продукта
     waiting_for_account_name = State()  # Ожидание названия аккаунта (опционально)
+    waiting_for_product = State()
     waiting_for_files = State()         # Ожидание ZIP-архива с аккаунтами
     waiting_for_metadata = State()      # Ожидание дополнительных характеристик (опционально)

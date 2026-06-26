@@ -29,7 +29,9 @@ async def run_bot() -> None:
 
     dp.include_router(router)
     dp.include_router(admin_router)
+    from app.bot.handlers_worker import router as worker_router
     dp.include_router(worker_router)
+
     logging.info("Бот запущен...")
     await bot.delete_webhook(drop_pending_updates=True)
     await dp.start_polling(bot)

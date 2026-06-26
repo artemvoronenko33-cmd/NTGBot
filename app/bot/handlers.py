@@ -791,3 +791,4 @@ async def topup_amount_received(message: Message, state: FSMContext):
 async def catch_all_callbacks(callback: CallbackQuery):
     print(f"⚠️ НЕОБРАБОТАННЫЙ CALLBACK: {callback.data}")
     await callback.answer(f"⚠️ No handler for: {callback.data}", show_alert=True)
+

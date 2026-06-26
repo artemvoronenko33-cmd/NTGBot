@@ -2,14 +2,16 @@
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 
+from aiogram.types import ReplyKeyboardMarkup, KeyboardButton
+from aiogram.utils.keyboard import ReplyKeyboardBuilder
 
 def get_worker_menu() -> ReplyKeyboardMarkup:
-    builder = InlineKeyboardBuilder()  # Можно оставить Reply, но лучше Inline
-    builder.button(text="📤 Загрузить аккаунты", callback_data="worker_upload_start")
-    builder.button(text="📊 Мои загруженные аккаунты", callback_data="worker_my_accounts")
-    builder.button(text="🔙 Главное меню", callback_data="back_to_main")
+    builder = ReplyKeyboardBuilder()
+    builder.button(text="📤 Загрузить аккаунты")
+    builder.button(text="📊 Мои загруженные аккаунты")
+    builder.button(text="🔙 Главное меню")
     builder.adjust(1)
-    return builder.as_markup()
+    return builder.as_markup(resize_keyboard=True)
 
 
 def get_cancel_kb() -> ReplyKeyboardMarkup:
