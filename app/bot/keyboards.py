@@ -1,4 +1,4 @@
-# app/bot/keyboards.py
+# app/bot/keyboard.py
 from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from typing import List
@@ -117,13 +117,7 @@ def admin_order_kb(order_id: int, is_paid: bool) -> InlineKeyboardMarkup:
         )
     return builder.as_markup()
 
-def get_worker_menu() -> ReplyKeyboardMarkup:
-    builder = ReplyKeyboardBuilder()
-    builder.button(text="📤 Загрузить аккаунты")
-    builder.button(text="📊 Мои загруженные аккаунты")
-    builder.button(text="🔙 Вернуться в главное меню")
-    builder.adjust(1)
-    return builder.as_markup(resize_keyboard=True)
+
 
 def get_admin_menu() -> ReplyKeyboardMarkup:
     builder = ReplyKeyboardBuilder()
