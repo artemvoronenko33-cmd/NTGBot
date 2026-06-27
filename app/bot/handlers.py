@@ -43,6 +43,11 @@ from app.services.payment_logger import (
     log_large_payment_admin_notified,
 )
 
+from app.db.repositories import CategoryRepository
+from sqlalchemy.ext.asyncio import AsyncSession
+
+
+
 logger = logging.getLogger(__name__)
 router = Router()
 
@@ -149,26 +154,30 @@ async def cmd_start(message: Message, state: FSMContext):
 
 # ==================== Ассортимент (кнопка меню) ====================
 @router.message(F.text == "🛒 Ассортимент")
-async def show_categories(message: Message):
-    async with async_session() as session:
-        stmt = select(Category).order_by(Category.id)
-        result = await session.execute(stmt)
-        cats = result.scalars().all()
+async def show_categories(message: Message, session: AsyncSession):
+    """Показываем все доступные категории"""
+    try:
+        # Используем repository вместо raw SQL
+        categories = await CategoryRepository.get_all_active_categories(session)
 
-        if not cats:
+        if not categories:
             await message.answer("📭 Категорий пока нет.")
             return
 
         await message.answer(
             "📂 Выберите категорию:",
-            reply_markup=categories_kb(cats)
+            reply_markup=categories_kb(categories)
         )
 
+    except Exception as e:
+        logger.exception(f"Error showing categories for user {message.from_user.id}: {e}")
+        await message.answer("❌ Ошибка при загрузке категорий. Попробуйте позже.")
 
 
 # ==================== Выбор категории (callback) ====================
 @router.callback_query(F.data.startswith("cat_"))
-async def process_category(callback: CallbackQuery):
+async def process_category(callback: CallbackQuery, session: AsyncSession):
+    """Обработка выбора категории и показ товаров"""
     logger.debug(f"Processing category selection. Data: {callback.data}")
 
     try:
@@ -178,30 +187,34 @@ async def process_category(callback: CallbackQuery):
         await callback.answer("❌ Ошибка формата", show_alert=True)
         return
 
-    async with async_session() as session:
-        stmt = select(Product).where(
-            Product.category_id == cat_id,
-            Product.is_active == True
-        )
-        result = await session.execute(stmt)
-        prods = result.scalars().all()
+    try:
+        # Используем repository для получения продуктов
+        products = await CategoryRepository.get_active_products_by_category(session, cat_id)
 
-        cat_stmt = select(Category).where(Category.id == cat_id)
-        cat_res = await session.execute(cat_stmt)
-        cat_obj = cat_res.scalar_one()
-
-        if not prods:
+        if not products:
             await callback.message.answer("📦 В этой категории пока нет товаров.")
             await callback.answer()
             return
 
+        # Получаем информацию о категории
+        category = await CategoryRepository.get_category_by_id(session, cat_id)
+        if not category:
+            logger.warning(f"Category {cat_id} not found when processing products")
+            await callback.answer("❌ Категория не найдена", show_alert=True)
+            return
+
         await callback.message.answer(
-            f"📂 Товары: <b>{cat_obj.name}</b>",
-            reply_markup=products_kb(prods)
+            f"📂 Товары: <b>{category.name}</b>",
+            reply_markup=products_kb(products),
+            parse_mode="HTML"
         )
 
         await callback.answer()
         await callback.message.delete()
+
+    except Exception as e:
+        logger.exception(f"Error processing category {cat_id}: {e}")
+        await callback.answer("❌ Ошибка при загрузке товаров", show_alert=True)
 
 
 # ==================== Выбор товара (callback) ====================
