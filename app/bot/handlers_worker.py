@@ -40,10 +40,9 @@ from app.bot.states import WorkerUploadStates
 # Keyboards
 from app.bot.keyboard.worker_kb import (
     get_worker_menu,
-    get_cancel_kb,
     worker_categories_kb,
     worker_products_kb,
-    worker_cancel_inline_kb,
+    get_cancel_inline_kb,
 )
 
 logger = logging.getLogger(__name__)
@@ -212,16 +211,16 @@ async def select_worker_product(callback: CallbackQuery, session: AsyncSession, 
             f"✅ <b>Продукт выбран:</b>\n\n"
             f"📂 Категория: <code>{category_name}</code>\n"
             f"📦 Продукт: <code>{product.name}</code>\n"
-            f"💰 Цена: <code>{price_fmt}</code>\n\n"
+#            f"💰 Цена: <code>{price_fmt}</code>\n\n"
             f"<b>Теперь отправьте ZIP-архив</b> с папками-аккаунтами.\n\n"
             f"📋 Структура архива:\n"
             f"<code>archive.zip\n"
             f"├─ Account_1/\n"
-            f"│  ├─ file1.txt\n"
-            f"│  └─ file2.zip\n"
+            f"│  ├─ file.txt\n"
+            f"│  └─ foto_x3.jpg\n"
             f"└─ Account_2/\n"
-            f"   └─ data.txt</code>",
-            reply_markup=worker_cancel_inline_kb(),   # ← Новая inline-клавиатура
+            f"   └─ file.txt</code>",
+            reply_markup=get_cancel_inline_kb(),   # ← Новая inline-клавиатура
             parse_mode="HTML"
         )
         await callback.answer()
