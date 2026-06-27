@@ -870,7 +870,8 @@ async def topup_amount_received(message: Message, state: FSMContext):
 
 
 # ==================== ОТЛАДКА: ловим ВСЕ остальные callback'и ====================
-@router.callback_query()
+# ==================== Кроме worker_ ====================
+@router.callback_query(~F.data.startswith("worker_"))
 async def catch_all_callbacks(callback: CallbackQuery):
     print(f"⚠️ НЕОБРАБОТАННЫЙ CALLBACK: {callback.data}")
     await callback.answer(f"⚠️ No handler for: {callback.data}", show_alert=True)

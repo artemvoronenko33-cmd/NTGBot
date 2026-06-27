@@ -43,6 +43,7 @@ from app.bot.keyboard.worker_kb import (
     get_cancel_kb,
     worker_categories_kb,
     worker_products_kb,
+    worker_cancel_inline_kb,
 )
 
 logger = logging.getLogger(__name__)
@@ -220,7 +221,7 @@ async def select_worker_product(callback: CallbackQuery, session: AsyncSession, 
             f"│  └─ file2.zip\n"
             f"└─ Account_2/\n"
             f"   └─ data.txt</code>",
-            reply_markup=get_cancel_kb(),
+            reply_markup=worker_cancel_inline_kb(),   # ← Новая inline-клавиатура
             parse_mode="HTML"
         )
         await callback.answer()

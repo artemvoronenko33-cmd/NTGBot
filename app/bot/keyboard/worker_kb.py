@@ -24,12 +24,7 @@ def get_worker_menu() -> ReplyKeyboardMarkup:
     return builder.as_markup(resize_keyboard=True)
 
 
-def get_cancel_kb() -> ReplyKeyboardMarkup:
-    """Клавиатура отмены (Reply KB)"""
-    return ReplyKeyboardMarkup(
-        keyboard=[[KeyboardButton(text="❌ Отмена")]],
-        resize_keyboard=True
-    )
+
 
 
 # ==================== INLINE КЛАВИАТУРЫ ДЛЯ ВЫБОРА ====================
@@ -109,3 +104,18 @@ def worker_zip_confirmation_kb() -> InlineKeyboardMarkup:
     builder.button(text="🔙 Главное меню", callback_data="worker_main_menu")
     builder.adjust(1)
     return builder.as_markup()
+
+#=============================== Кнопки Отмены =============================================
+
+def worker_cancel_inline_kb() -> InlineKeyboardMarkup:
+    """Inline-кнопка отмены (для edit_text)"""
+    builder = InlineKeyboardBuilder()
+    builder.button(text="❌ Отмена", callback_data="worker_cancel")
+    return builder.as_markup()
+
+def get_cancel_kb() -> ReplyKeyboardMarkup:
+    """Клавиатура отмены (Reply KB)"""
+    return ReplyKeyboardMarkup(
+        keyboard=[[KeyboardButton(text="❌ Отмена")]],
+        resize_keyboard=True
+    )
