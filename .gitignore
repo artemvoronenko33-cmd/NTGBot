@@ -4,3 +4,5 @@
 
 /.env/
 
+logs/
+logs/*.log

@@ -1,5 +1,10 @@
 # app/bot/keyboard.py
-from aiogram.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup
+from aiogram.types import (
+    ReplyKeyboardMarkup,
+    KeyboardButton,
+    InlineKeyboardMarkup,
+    InlineKeyboardButton,  # ← ДОБАВЛЕНО
+)
 from aiogram.utils.keyboard import InlineKeyboardBuilder
 from typing import List
 from config import settings

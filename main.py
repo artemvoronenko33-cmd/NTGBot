@@ -9,7 +9,7 @@ from app.bot.handlers import router
 from app.web.app import create_app
 from config import settings
 
-from app.db.middleware import DBSessionMiddleware   # ← добавь импорт
+from app.db.middleware import DBSessionMiddleware
 from app.bot.handlers_worker import router as worker_router
 from app.bot.handlers_admin import router as admin_router
 
@@ -25,11 +25,10 @@ async def run_bot() -> None:
     # === Middleware ==
     session_middleware = DBSessionMiddleware()
     dp.message.middleware(session_middleware)
-    dp.callback_query.middleware(session_middleware)  # на всякий случай
+    dp.callback_query.middleware(session_middleware)
 
     dp.include_router(router)
     dp.include_router(admin_router)
-    from app.bot.handlers_worker import router as worker_router
     dp.include_router(worker_router)
 
     logging.info("Бот запущен...")
@@ -50,7 +49,19 @@ async def run_web() -> None:
 
 
 async def main() -> None:
-    await asyncio.gather(run_bot(), run_web())
+    try:
+        await asyncio.gather(
+            run_bot(),
+            run_web(),
+            return_exceptions=False
+        )
+    except Exception as e:
+        logging.error("Fatal error in main event loop: %s", e)
+        raise
+    finally:
+        logging.info("Закрываем ресурсы бота...")
+        await bot.session.close()
+        logging.info("Ресурсы закрыты успешно.")
 
 
 if __name__ == "__main__":

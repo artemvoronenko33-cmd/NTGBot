@@ -1,4 +1,5 @@
 # app/bot/handlers.py
+import asyncio
 import logging
 from io import BytesIO
 
@@ -31,6 +32,16 @@ from app.services.balance import (
     TransactionType
 )
 
+from app.services.payment_logger import (
+    log_payment_start,
+    log_payment_success,
+    log_payment_failed,
+    log_topup_initiated,
+    log_topup_completed,
+    log_refund,
+    log_rate_limit_hit,
+    log_large_payment_admin_notified,
+)
 
 logger = logging.getLogger(__name__)
 router = Router()
@@ -158,12 +169,12 @@ async def show_categories(message: Message):
 # ==================== Выбор категории (callback) ====================
 @router.callback_query(F.data.startswith("cat_"))
 async def process_category(callback: CallbackQuery):
-    print(f"✅ Handler cat_ сработал! Data: {callback.data}")
+    logger.debug(f"Processing category selection. Data: {callback.data}")
 
     try:
         cat_id = int(callback.data.split("_")[1])
     except (IndexError, ValueError) as e:
-        print(f"❌ Ошибка парсинга ID: {e}")
+        logger.warning(f"Failed to parse category ID: {e}")
         await callback.answer("❌ Ошибка формата", show_alert=True)
         return
 
@@ -196,7 +207,7 @@ async def process_category(callback: CallbackQuery):
 # ==================== Выбор товара (callback) ====================
 @router.callback_query(F.data.startswith("prod_"))
 async def process_product(callback: CallbackQuery):
-    print(f"✅ Handler prod_ сработал! Data: {callback.data}")
+    logger.debug(f"Processing product selection. Data: {callback.data}")
 
     try:
         prod_id = int(callback.data.split("_")[1])
@@ -302,7 +313,7 @@ async def clear_cart_handler(callback: CallbackQuery):
 # ==================== Назад ====================
 @router.callback_query(F.data == "back_to_cats")
 async def back_to_categories(callback: CallbackQuery):
-    print("✅ Handler back_to_cats сработал!")
+    logger.debug("Navigating back to categories")
     await callback.message.delete()
     await show_categories(callback.message)
     await callback.answer()
@@ -338,6 +349,8 @@ async def pay_from_balance(callback: CallbackQuery):
             show_alert=True
         )
         logger.warning("Rate limit hit for user %s", user_id)
+        log_rate_limit_hit(user_id, settings.PAYMENT_RATE_LIMIT_ATTEMPTS,
+                           settings.PAYMENT_RATE_LIMIT_WINDOW)
         return
 
     await callback.answer()
@@ -351,9 +364,23 @@ async def pay_from_balance(callback: CallbackQuery):
 
             for item in cart_items:
                 stmt = select(Product).where(Product.id == item["product_id"])
-                prod = (await session.execute(stmt)).scalar_one()
+                prod = (await session.execute(stmt)).scalar_one_or_none()
+
+                if not prod:
+                    logger.error(f"Product {item['product_id']} not found during payment")
+                    await session.rollback()
+                    await callback.message.edit_text("❌ Один из товаров больше недоступен. Корзина очищена.")
+                    await clear_cart(user_id)
+                    return
+
                 total_cents += prod.price * item["qty"]
                 products_data.append((prod, item["qty"]))
+
+            total_usd = total_cents / 100
+
+            # 📊 Логируем начало платежа
+            log_payment_start(user_id, order_id=None, amount_usd=total_usd,
+                              payment_method="balance")
 
             # 2. Списываем баланс через сервис (атомарно + лог + история)
             new_balance = await record_transaction(
@@ -363,16 +390,16 @@ async def pay_from_balance(callback: CallbackQuery):
                 transaction_type=TransactionType.ORDER_PAYMENT,
                 description="Оплата заказа (корзина)",
                 metadata={"cart_items": len(cart_items)},
-                order_id=None,  # order_id будет установлен после flush(), передадим позже при необходимости
+                order_id=None,
                 topup_id=None,
-                ip_address=None,  # ← исправлено: None вместо callback.from_user.id
+                ip_address=None,
             )
 
             # 3. Создаём заказ
             order = Order(
                 user_id=user_id,
                 status="paid",
-                total_price=total_cents / 100,
+                total_price=total_usd,
             )
             session.add(order)
             await session.flush()
@@ -382,7 +409,7 @@ async def pay_from_balance(callback: CallbackQuery):
                 session.add(OrderItem(
                     order_id=order.id,
                     product_id=prod.id,
-                    product_name=prod.name,  # ← Сохраняем название товара!
+                    product_name=prod.name,
                     quantity=qty,
                     price_at_purchase=prod.price / 100,
                 ))
@@ -391,7 +418,7 @@ async def pay_from_balance(callback: CallbackQuery):
             payment = Payment(
                 order_id=order.id,
                 user_id=user_id,
-                amount_usd=total_cents / 100,
+                amount_usd=total_usd,
                 status="completed",
                 payment_method="balance",
             )
@@ -403,32 +430,44 @@ async def pay_from_balance(callback: CallbackQuery):
             await callback.message.edit_text(
                 f"✅ <b>Оплата прошла успешно!</b>\n\n"
                 f"📋 Заказ #{order.id}\n"
-                f"💵 Списано: ${total_cents / 100:.2f}\n"
+                f"💵 Списано: ${total_usd:.2f}\n"
                 f"💳 Баланс: ${new_balance / 100:.2f}",
             )
             await notify_payment_success(user_id, order.id)
 
+            # 📊 Логируем успешный платёж
+            log_payment_success(user_id, order.id, total_usd, "balance", new_balance)
+
             # 🔔 Админ-уведомление для крупных платежей
-            if total_cents / 100 >= settings.LARGE_PAYMENT_THRESHOLD_USD:
+            if total_usd >= settings.LARGE_PAYMENT_THRESHOLD_USD:
                 await notify_admin_large_payment(
                     user_id=user_id,
                     order_id=order.id,
-                    amount_usd=total_cents / 100,
+                    amount_usd=total_usd,
                     username=callback.from_user.username,
                 )
+                # 📊 Логируем уведомление администратора
+                log_large_payment_admin_notified(user_id, order.id, total_usd,
+                                                 callback.from_user.username or "unknown")
 
             logger.info(
                 "Balance payment completed: user=%s order=%s amount=%.2f",
-                user_id, order.id, total_cents / 100
+                user_id, order.id, total_usd
             )
 
         except ValueError as e:
             await session.rollback()
             logger.warning("Payment failed for user %s: %s", user_id, e)
+            # 📊 Логируем ошибку платежа
+            log_payment_failed(user_id, order_id=None, amount_usd=total_cents / 100,
+                               payment_method="balance", error_reason=str(e))
             await callback.message.edit_text(f"❌ Ошибка: {e}")
         except Exception as e:
             await session.rollback()
             logger.exception("Unexpected error during balance payment: user=%s", user_id)
+            # 📊 Логируем непредвиденную ошибку
+            log_payment_failed(user_id, order_id=None, amount_usd=total_cents / 100,
+                               payment_method="balance", error_reason=f"Unexpected: {str(e)}")
             await callback.message.edit_text("❌ Внутренняя ошибка. Попробуйте позже.")
 
     # Очищаем корзину только после успешной оплаты
@@ -562,6 +601,9 @@ async def refund_order(callback: CallbackQuery):
         payment.status = "refunded"
         order.status = "refunded"
         await session.commit()
+
+        # 📊 Логируем возврат средств
+        log_refund(payment.user_id, order_id, payment.amount_usd)
 
         logger.info(
             "Refund processed: order=%s user=%s amount=%.2f new_balance=%d",
@@ -702,7 +744,18 @@ async def topup_amount_received(message: Message, state: FSMContext):
 
     # Получаем актуальный курс USD за 1 единицу монеты
     try:
-        price_usd = await get_price_usd(ticker)
+        try:
+            price_usd = await asyncio.wait_for(
+                get_price_usd(ticker),
+                timeout=5.0
+            )
+        except asyncio.TimeoutError:
+            logger.error("Timeout getting price for ticker: %s", ticker)
+            await message.answer(
+                "⏱️ Сервис курсов временно недоступен. Попробуйте позже.",
+                reply_markup=topup_currency_kb(),
+            )
+            return
     except Exception as e:
         logger.error("rates error: %s", e)
         await message.answer(
@@ -732,7 +785,20 @@ async def topup_amount_received(message: Message, state: FSMContext):
 
         label = f"topup_{topup.id}"
         try:
-            addr = await generate_address(label, currency=ticker)
+            try:
+                addr = await asyncio.wait_for(
+                    generate_address(label, currency=ticker),
+                    timeout=10.0
+                )
+            except asyncio.TimeoutError:
+                logger.error("Timeout generating address for ticker: %s", ticker)
+                await session.rollback()
+                await message.answer(
+                    f"⏱️ <b>{cur_name}</b> сервис временно недоступен.\n\n"
+                    "Пожалуйста, выберите другую монету:",
+                    reply_markup=topup_currency_kb(),
+                )
+                return
         except RuntimeError as e:
             err = str(e)
             logger.error("generate_address error: %s", err)
@@ -760,6 +826,10 @@ async def topup_amount_received(message: Message, state: FSMContext):
         topup.address = addr.address
         topup.label = label
         await session.commit()
+
+        # 📊 Логируем инициирование пополнения
+        log_topup_initiated(message.from_user.id, topup.id, amount, ticker, addr.address)
+
         request_num = 1_000_000_000 + topup.id
         address = addr.address
 
