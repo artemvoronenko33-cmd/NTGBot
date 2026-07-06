@@ -1,5 +1,7 @@
 # app/db/models/user.py
 from sqlalchemy import Column, BigInteger, String, Boolean, DateTime, func
+from sqlalchemy.orm import relationship
+
 from app.db.base import Base
 
 
@@ -17,5 +19,7 @@ class User(Base):
     # В конец класса User добавь:
     is_worker = Column(Boolean, default=False, server_default='false')
     worker_notes = Column(String(255), nullable=True)  # например, "Основной поставщикff"
- 
+
+    #user = relationship("User", back_populates="orders")
+    orders = relationship("Order", back_populates="user", cascade="all, delete-orphan")
     

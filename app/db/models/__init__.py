@@ -1,7 +1,7 @@
 ﻿from .user import User
 from .category import Category
 from .product import Product
-from .order import Order, OrderItem
+from .order import Order, OrderItem, OrderStatus
 from .payment import Payment
 from .topup import TopUp
 from .balance_transaction import BalanceTransaction, TransactionType
@@ -14,6 +14,7 @@ __all__ = [
     "Product",
     "Order",
     "OrderItem",
+    "OrderStatus",
     "Payment",
     "TopUp",
     "BalanceTransaction",

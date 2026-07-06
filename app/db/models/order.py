@@ -1,50 +1,57 @@
 # app/db/models/order.py
-from sqlalchemy import Column, Integer, String, Float, DateTime, ForeignKey, func, BigInteger
+
+from sqlalchemy import Column, Integer, String, Float, Boolean, DateTime, ForeignKey, JSON, BigInteger
 from sqlalchemy.orm import relationship
+from sqlalchemy.sql import func
+from enum import Enum
 from app.db.base import Base
 from datetime import datetime
+
+
+class OrderStatus(str, Enum):
+    PENDING = "pending"
+    PAID = "paid"
+    PROCESSING = "processing"
+    COMPLETED = "completed"
+    PARTIAL = "partial"
+    CANCELLED = "cancelled"
+    REFUNDED = "refunded"
 
 
 class Order(Base):
     __tablename__ = "orders"
 
-    id = Column(BigInteger, primary_key=True, autoincrement=True)
+    id = Column(BigInteger, primary_key=True, index=True)
     user_id = Column(BigInteger, ForeignKey("users.id"), nullable=False)
-    total_price = Column(Float, default=0.0)
-    status = Column(String(50), default="created")
-    created_at = Column(DateTime, default=datetime.utcnow)
+    status = Column(String(50), default=OrderStatus.PENDING.value)
+    total_price = Column(Float, nullable=False)
+    created_at = Column(DateTime, default=func.now())
+    updated_at = Column(DateTime, default=func.now(), onupdate=func.now())
 
-    # ✅ ОДНОСТОРОННИЕ СВЯЗИ (без back_populates — надёжно и просто)
-    user = relationship("User")  # ← просто связь, без обратной
-    items = relationship("OrderItem", cascade="all, delete-orphan")
-    status_history = relationship("OrderStatusHistory", cascade="all, delete-orphan")
+    # Прогресс выдачи аккаунтов
+    delivery_info = Column(JSON, nullable=True)   # {"overall": 45, "items": {...}}
 
-    reserved_items = relationship(
-        "AccountItem",
-        back_populates=None,  # пока None, т.к. мы убрали с той стороны
-        foreign_keys="AccountItem.reserved_for_order_id",
-        lazy="selectin"
-    )
-    #items = relationship("OrderItem", back_populates="order", cascade="all, delete-orphan")
+    user = relationship("User", back_populates="orders")
+    items = relationship("OrderItem", back_populates="order", cascade="all, delete-orphan")
+    status_history = relationship("OrderStatusHistory", back_populates="order")
+
 
 class OrderItem(Base):
     __tablename__ = "order_items"
-    id = Column(BigInteger, primary_key=True)
+
+    id = Column(BigInteger, primary_key=True, index=True)
     order_id = Column(BigInteger, ForeignKey("orders.id"), nullable=False)
     product_id = Column(Integer, ForeignKey("products.id"), nullable=False)
-
-    # ✅ НОВОЕ ПОЛЕ: название товара на момент покупки
-    product_name = Column(String(150), nullable=True)  # Можно nullable, если старые записи без имени
-
     quantity = Column(Integer, default=1)
     price_at_purchase = Column(Float, nullable=False)
+    product_name = Column(String(150))
 
+    # Поля для процесса выдачи
+    delivered_quantity = Column(Integer, default=0)
+    reserved_accounts = Column(JSON, default=list)  # список s3_prefix
+
+    order = relationship("Order", back_populates="items")
     product = relationship("Product")
-
-    # ✅ Теперь это безопасно работает!
-    def __repr__(self):
-        name = self.product_name or f"Товар #{self.product_id}"
-        return f"{name} × {self.quantity} = ${self.price_at_purchase * self.quantity:.2f}"
 
 
 class OrderStatusHistory(Base):
@@ -55,6 +62,4 @@ class OrderStatusHistory(Base):
     new_status = Column(String(50))
     changed_at = Column(DateTime, default=datetime.utcnow)
 
-    # ✅ БЕЗОПАСНЫЙ __repr__
-    def __repr__(self):
-        return f"{self.old_status or '—'} → {self.new_status}"
+    order = relationship("Order", back_populates="status_history")

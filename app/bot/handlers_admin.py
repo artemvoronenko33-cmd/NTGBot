@@ -1,15 +1,18 @@
 # app/bot/handlers_admin.py
+import logging
 from aiogram import Router
+from aiogram.fsm.context import FSMContext
 from aiogram.types import Message
-from aiogram.filters import Command
+from aiogram.filters import Command, StateFilter
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import User
+from app.db.models import User, OrderStatus, Order, OrderItem, Payment
+from app.db.models.order import OrderStatusHistory
 from config import settings  # или откуда импортируется settings
-from sqlalchemy import text
+from sqlalchemy import text, select, delete
 from app.bot.keyboards import get_admin_menu, get_cancel_kb
 
-
+logger = logging.getLogger(__name__)
 router = Router(name="admin_router")
 
 @router.message(Command("admin"))
@@ -123,3 +126,110 @@ async def cmd_workers(message: Message, session: AsyncSession):
     text_msg = "\n".join(lines)
 
     await message.answer(text_msg, parse_mode=None)
+
+@router.message(Command("deficit"))
+async def show_deficit(message: Message, session: AsyncSession):
+    """Сводка дефицита по товарам"""
+    try:
+        sql = """
+            SELECT 
+                p.name as product_name,
+                c.name as category_name,
+                COUNT(ai.id) as available,
+                COALESCE(SUM(oi.quantity - oi.delivered_quantity), 0) as needed
+            FROM products p
+            JOIN categories c ON p.category_id = c.id
+            LEFT JOIN account_items ai 
+                ON ai.product_id = p.id AND ai.is_reserved = false
+            LEFT JOIN order_items oi ON oi.product_id = p.id
+            GROUP BY p.id, p.name, c.name
+            HAVING COALESCE(SUM(oi.quantity - oi.delivered_quantity), 0) > 0
+        """
+
+        result = await session.execute(text(sql))
+        rows = result.all()
+
+        if not rows:
+            await message.answer("✅ Дефицита нет. Все заказы могут быть выполнены.")
+            return
+
+        response_text = "📉 <b>Дефицит аккаунтов:</b>\n\n"
+        for row in rows:
+            response_text += f"📦 {row.product_name} ({row.category_name})\n"
+            response_text += f"   Нужно: {row.needed} | В наличии: {row.available or 0}\n\n"
+
+        await message.answer(response_text, parse_mode="HTML")
+
+    except Exception as e:
+        logger.exception("Error in deficit command")
+        await message.answer("❌ Ошибка при получении сводки.")
+
+@router.message(Command("queue_status"))
+async def queue_status(message: Message, session: AsyncSession):
+    """Статус очереди заказов (для админа)"""
+    try:
+        # Заказы в обработке
+        stmt = select(Order).where(
+            Order.status.in_([OrderStatus.PAID.value, OrderStatus.PROCESSING.value, OrderStatus.PARTIAL.value])
+        ).order_by(Order.created_at)
+
+        result = await session.execute(stmt)
+        orders = result.scalars().all()
+
+        if not orders:
+            await message.answer("📭 Очередь пуста.")
+            return
+
+        text = "📋 <b>Очередь заказов:</b>\n\n"
+        for order in orders:
+            progress = order.delivery_info.get("overall", 0) if order.delivery_info else 0
+            text += f"Заказ #{order.id} | {order.status.upper()}\n"
+            text += f"   Пользователь: {order.user_id}\n"
+            text += f"   Прогресс: {progress}%\n"
+            if order.delivery_info and "items" in order.delivery_info:
+                for pid, info in order.delivery_info["items"].items():
+                    text += f"   • {info.get('product_name', pid)}: {info.get('delivered', 0)}/{info.get('needed', 0)}\n"
+            text += "\n"
+
+        await message.answer(text, parse_mode="HTML")
+
+    except Exception as e:
+        logger.exception("Error in queue_status")
+        await message.answer("❌ Ошибка при получении очереди.")
+
+
+@router.message(Command("delete_orders"))
+async def delete_orders(message: Message, session: AsyncSession, state: FSMContext):
+    """Начать процесс удаления заказов"""
+    await message.answer("Отправь ID заказов через запятую (например: 24,25,30)")
+    await state.set_state("waiting_for_order_ids_to_delete")
+
+
+@router.message(StateFilter("waiting_for_order_ids_to_delete"))
+async def process_order_ids(message: Message, session: AsyncSession, state: FSMContext):
+    try:
+        order_ids = [int(x.strip()) for x in message.text.split(',') if x.strip().isdigit()]
+
+        if not order_ids:
+            await message.answer("Не найдено корректных ID.")
+            await state.clear()
+            return
+
+        # Удаляем всё связанное
+        await session.execute(delete(OrderItem).where(OrderItem.order_id.in_(order_ids)))
+        await session.execute(delete(Payment).where(Payment.order_id.in_(order_ids)))  # ← Добавлено
+        await session.execute(delete(OrderStatusHistory).where(OrderStatusHistory.order_id.in_(order_ids)))
+
+        # Удаляем заказы
+        result = await session.execute(delete(Order).where(Order.id.in_(order_ids)))
+
+        await session.commit()
+
+        await message.answer(f"✅ Успешно удалено {result.rowcount} заказов (включая все связанные записи).")
+
+    except Exception as e:
+        await session.rollback()
+        error_msg = str(e)[:200].replace('<', '&lt;').replace('>', '&gt;')  # экранируем
+        await message.answer(f"Ошибка: {error_msg}")
+    finally:
+        await state.clear()

@@ -45,6 +45,9 @@ from app.bot.keyboard.worker_kb import (
     get_cancel_inline_kb,
 )
 
+from app.services.order_queue import OrderQueueService
+from app.services.redis_cart import redis_client
+
 logger = logging.getLogger(__name__)
 router = Router(name="worker_router")
 
@@ -411,6 +414,15 @@ async def process_zip_upload(message: Message, state: FSMContext, session: Async
             total_size=sum(acc["total_size"] for acc in uploaded)
         )
 
+        # === Автоматически запускаем обработку очереди ===
+        try:
+            from app.services.order_queue import OrderQueueService
+            queue_service = OrderQueueService()
+            await queue_service.enqueue_all_pending(session)
+        except Exception as e:
+            logger.error(f"Не удалось добавить заказы в очередь: {e}")
+        # ===============================================
+
         # Уведомляем пользователя
         await message.answer(
             f"✅ <b>Успешно загружено {len(uploaded)} аккаунтов!</b>\n\n"
@@ -426,6 +438,10 @@ async def process_zip_upload(message: Message, state: FSMContext, session: Async
         )
 
         await state.clear()
+
+        queue_service = OrderQueueService()
+        # Можно добавить в Redis отдельный ключ "requeue:partial" или просто логировать
+        logger.info("Новые аккаунты загружены. Рекомендуется выполнить /requeue_partial")
 
     except ValueError as e:
         await session.rollback()

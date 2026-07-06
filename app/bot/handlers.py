@@ -451,6 +451,18 @@ async def pay_from_balance(callback: CallbackQuery):
             # 📊 Логируем успешный платёж
             log_payment_success(user_id, order.id, total_usd, "balance", new_balance)
 
+            # === Добавляем заказ в очередь на выдачу ===
+            try:
+                from app.services.order_queue import OrderQueueService
+                from app.services.redis_cart import redis_client  # ← ПРЯМОЙ ИМПОРТ
+
+                queue_service = OrderQueueService()
+                await queue_service.enqueue_order(order.id)
+                logger.info(f"Заказ #{order.id} добавлен в очередь на выдачу")
+            except Exception as e:
+                logger.error(f"Не удалось добавить заказ {order.id} в очередь: {e}")
+            # ============================================
+
             # 🔔 Админ-уведомление для крупных платежей
             if total_usd >= settings.LARGE_PAYMENT_THRESHOLD_USD:
                 await notify_admin_large_payment(
