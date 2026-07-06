@@ -1,4 +1,12 @@
 import asyncio
+import sys
+
+if sys.platform == "win32":
+    # Создаём и устанавливаем политику
+    loop = asyncio.SelectorEventLoop()
+    asyncio.set_event_loop(loop)
+    print("✅ SelectorEventLoop set directly")
+
 import logging
 
 import uvicorn
