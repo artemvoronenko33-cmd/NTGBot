@@ -5,7 +5,7 @@ if sys.platform == "win32":
     # Создаём и устанавливаем политику
     loop = asyncio.SelectorEventLoop()
     asyncio.set_event_loop(loop)
-    print("✅ SelectorEventLoop set directly")
+    print("SelectorEventLoop set directly")
 
 import logging
 import sys
@@ -26,6 +26,8 @@ from app.bot.handlers_worker import router as worker_router
 from app.bot.handlers_admin import router as admin_router
 
 from app.services.order_queue import OrderQueueService
+
+from app.db.middleware import MaintenanceMiddleware
 
 # ====================== WINDOWS FIX ======================
 if sys.platform == "win32":
@@ -74,8 +76,11 @@ async def run_bot() -> None:
     dp = Dispatcher()
 
     session_middleware = DBSessionMiddleware()
+
     dp.message.middleware(session_middleware)
     dp.callback_query.middleware(session_middleware)
+    dp.message.middleware(MaintenanceMiddleware())
+    dp.callback_query.middleware(MaintenanceMiddleware())
 
     dp.include_router(router)
     dp.include_router(admin_router)

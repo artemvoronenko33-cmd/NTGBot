@@ -10,7 +10,7 @@ from alembic import context
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-from app.db.models import User, Category, Product, Order, OrderItem, Payment, TopUp  # noqa: F401
+from app.db.models import User, Category, Product, Order, OrderItem, Payment, TopUp, SystemSettings  # добавьте сюда  # noqa: F401
 
 # 1. Явно указываем путь к .env относительно корня проекта
 dotenv_path = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".env"))

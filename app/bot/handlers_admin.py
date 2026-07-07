@@ -12,6 +12,8 @@ from config import settings  # или откуда импортируется se
 from sqlalchemy import text, select, delete
 from app.bot.keyboards import get_admin_menu, get_cancel_kb
 
+from app.services.maintenance import MaintenanceService
+
 logger = logging.getLogger(__name__)
 router = Router(name="admin_router")
 
@@ -233,3 +235,26 @@ async def process_order_ids(message: Message, session: AsyncSession, state: FSMC
         await message.answer(f"Ошибка: {error_msg}")
     finally:
         await state.clear()
+
+
+@router.message(Command("maintenance_on"))
+async def cmd_maintenance_on(message: Message):
+    if message.from_user.id not in settings.ADMIN_IDS:
+        await message.answer("Нет доступа.")
+        return
+
+    await MaintenanceService.enable_maintenance(
+        message="Ведутся технические работы. Сервер перезагружается.",
+        updated_by=message.from_user.id
+    )
+    await message.answer("✅ Сервисный режим ВКЛЮЧЁН")
+
+
+@router.message(Command("maintenance_off"))
+async def cmd_maintenance_off(message: Message):
+    if message.from_user.id not in settings.ADMIN_IDS:
+        await message.answer("Нет доступа.")
+        return
+
+    await MaintenanceService.disable_maintenance()
+    await message.answer("✅ Сервисный режим ВЫКЛЮЧЕН")

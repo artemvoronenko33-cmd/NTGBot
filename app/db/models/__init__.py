@@ -7,6 +7,7 @@ from .topup import TopUp
 from .balance_transaction import BalanceTransaction, TransactionType
 from .stats import StatsCache,StatsDaily,StatsProduct  # ✅ Добавляем
 from .account_item import AccountStatus,AccountItem
+from .system_settings import SystemSettings
 
 __all__ = [
     "User",
