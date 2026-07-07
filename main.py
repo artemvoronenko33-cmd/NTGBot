@@ -8,9 +8,13 @@ if sys.platform == "win32":
     print("✅ SelectorEventLoop set directly")
 
 import logging
+import sys
+import warnings
+from contextlib import asynccontextmanager
 
 import uvicorn
 from aiogram import Dispatcher
+from fastapi import FastAPI
 
 from app.bot.bot_instance import bot
 from app.bot.handlers import router
@@ -23,6 +27,14 @@ from app.bot.handlers_admin import router as admin_router
 
 from app.services.order_queue import OrderQueueService
 
+# ====================== WINDOWS FIX ======================
+if sys.platform == "win32":
+    # Создаём и устанавливаем политику
+    loop = asyncio.SelectorEventLoop()
+    asyncio.set_event_loop(loop)
+    print("[OK] SelectorEventLoop set directly")
+
+# ====================== ЛОГИРОВАНИЕ ======================
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
@@ -30,10 +42,37 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
+logging.getLogger("uvicorn.access").setLevel(logging.WARNING)
+logging.getLogger("asyncio").setLevel(logging.ERROR)
+
+
+# ====================== LIFESPAN ======================
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    logger.info("🚀 Запуск бота и веб-сервера...")
+    yield
+    logger.info("🛑 Начинаем graceful shutdown...")
+    await bot.session.close()
+    logger.info("[OK] Ресурсы закрыты.")
+
+
+def create_web_app() -> FastAPI:
+    app = create_app()
+
+    @app.get("/health")
+    @app.get("/")
+    async def health_check():
+        return {"status": "healthy"}
+
+    # Привязываем lifespan
+    app.router.lifespan_context = lifespan
+    return app
+
+
+# ====================== BOT ======================
 async def run_bot() -> None:
     dp = Dispatcher()
 
-    # === Middleware ==
     session_middleware = DBSessionMiddleware()
     dp.message.middleware(session_middleware)
     dp.callback_query.middleware(session_middleware)
@@ -42,60 +81,78 @@ async def run_bot() -> None:
     dp.include_router(admin_router)
     dp.include_router(worker_router)
 
-    # === Background task для обработки заказов ===
-    asyncio.create_task(order_processor())
+    # Запускаем фоновую задачу
+    processor_task = asyncio.create_task(order_processor())
 
-    logging.info("Бот запущен...")
+    logger.info("🤖 Aiogram polling запущен...")
     await bot.delete_webhook(drop_pending_updates=True)
-    await dp.start_polling(bot)
+
+    try:
+        await dp.start_polling(
+            bot,
+            allowed_updates=dp.resolve_used_update_types(),
+            handle_signals=False
+        )
+    except Exception as e:
+        if not isinstance(e, asyncio.CancelledError):
+            logger.error(f"Polling error: {e}")
+    finally:
+        # Корректно отменяем фоновую задачу
+        if not processor_task.done():
+            processor_task.cancel()
+            try:
+                await processor_task
+            except asyncio.CancelledError:
+                pass
+        logger.info("Polling завершён.")
+
 
 async def order_processor():
-    """Фоновая обработка заказов"""
     from app.db.engine import async_session
-    from app.services.order_queue import OrderQueueService
-
     queue_service = OrderQueueService()
 
     while True:
         try:
             async with async_session() as session:
-                # Запускаем обработку одной итерации
                 await queue_service.process_single_order(session)
-                await asyncio.sleep(2)  # небольшая пауза
+                await asyncio.sleep(2)
+        except asyncio.CancelledError:
+            logger.info("Order processor остановлен")
+            break
         except Exception as e:
-            logger.error(f"Error in order processor: {e}")
+            logger.error(f"Error in order processor: {e}", exc_info=True)
             await asyncio.sleep(10)
 
-async def run_web() -> None:
-    web_app = create_app()
+
+# ====================== MAIN ======================
+async def main() -> None:
+    web_app = create_web_app()
+
     config = uvicorn.Config(
         web_app,
         host=settings.WEBHOOK_HOST,
         port=settings.WEBHOOK_PORT,
-        log_level="info",
+        log_level="warning",
+        timeout_keep_alive=65,
     )
     server = uvicorn.Server(config)
-    await server.serve()
 
-
-async def main() -> None:
     try:
         await asyncio.gather(
             run_bot(),
-            run_web(),
-            return_exceptions=False
+            server.serve(),
+            return_exceptions=True
         )
     except Exception as e:
-        logging.error("Fatal error in main event loop: %s", e)
-        raise
+        logger.error(f"Fatal error: {e}", exc_info=True)
     finally:
-        logging.info("Закрываем ресурсы бота...")
-        await bot.session.close()
-        logging.info("Ресурсы закрыты успешно.")
+        logger.info("Приложение завершило работу.")
 
 
 if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        logging.info("Бот остановлен.")
+        logger.info("Бот остановлен пользователем (Ctrl+C)")
+    except Exception as e:
+        logger.error(f"Необработанная ошибка: {e}")
