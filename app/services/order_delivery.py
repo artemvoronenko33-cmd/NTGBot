@@ -20,6 +20,7 @@ class OrderDeliveryService:
         self.storage = StorageService()
 
     async def reserve_accounts_for_order(self, session: AsyncSession, order_id: int) -> bool:
+        """Резервирует аккаунты для заказа (без новой транзакции)"""
         order = await session.get(Order, order_id)
         if not order:
             return False
@@ -28,16 +29,15 @@ class OrderDeliveryService:
         delivery_info = order.delivery_info or {"overall": 0, "items": {}}
 
         for item in order.items:
-            needed = item.quantity - item.delivered_quantity
+            needed = item.quantity - (item.delivered_quantity or 0)
             if needed <= 0:
                 continue
 
-            # Ищем свободные аккаунты
             stmt = select(AccountItem).where(
                 AccountItem.product_id == item.product_id,
                 AccountItem.is_reserved == False,
-                AccountItem.status == "free"  # если есть статус
-            ).limit(needed)
+                AccountItem.status == "free"
+            ).with_for_update().limit(needed)
 
             result = await session.execute(stmt)
             available_accounts = result.scalars().all()
@@ -52,11 +52,10 @@ class OrderDeliveryService:
                     acc.is_reserved = True
                     acc.reserved_for_order_id = order_id
                     acc.reserved_at = datetime.utcnow()
-                    acc.status = "reserved"  # если есть
+                    acc.status = "reserved"
 
-                item.delivered_quantity += reserved_count
+                item.delivered_quantity = (item.delivered_quantity or 0) + reserved_count
 
-            # Обновляем прогресс
             delivery_info["items"][str(item.product_id)] = {
                 "needed": item.quantity,
                 "delivered": item.delivered_quantity,
@@ -68,7 +67,7 @@ class OrderDeliveryService:
 
         # Общий прогресс
         total_needed = sum(i.quantity for i in order.items)
-        total_delivered = sum(i.delivered_quantity for i in order.items)
+        total_delivered = sum((i.delivered_quantity or 0) for i in order.items)
         delivery_info["overall"] = int((total_delivered / total_needed) * 100) if total_needed > 0 else 100
 
         order.delivery_info = delivery_info
@@ -78,63 +77,60 @@ class OrderDeliveryService:
         else:
             order.status = OrderStatus.PARTIAL.value
 
-        await session.commit()
         return success
 
     async def build_order_archive(self, session: AsyncSession, order_id: int) -> Tuple[Optional[bytes], str]:
+        """Собирает архив заказа"""
         order = await session.get(Order, order_id)
         if not order:
             return None, ""
 
-        password = os.urandom(12).hex()  # надёжный пароль
+        password = os.urandom(12).hex()
         archive_name = f"order_{order_id}.zip"
 
-        with tempfile.TemporaryDirectory() as tmp_dir:
-            archive_path = os.path.join(tmp_dir, archive_name)
+        try:
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                archive_path = os.path.join(tmp_dir, archive_name)
 
-            with zipfile.ZipFile(archive_path, 'w', zipfile.ZIP_DEFLATED, compresslevel=9) as zipf:
-                zipf.setpassword(password.encode('utf-8'))
+                with zipfile.ZipFile(archive_path, 'w', zipfile.ZIP_DEFLATED, compresslevel=9) as zipf:
+                    zipf.setpassword(password.encode('utf-8'))
 
-                for item in order.items:
-                    for s3_prefix in (item.reserved_accounts or []):
-                        local_files = await self._download_account_from_s3(s3_prefix)
-                        for rel_path, data in local_files.items():
-                            zipf.writestr(rel_path, data)
+                    for item in order.items:
+                        for s3_prefix in (item.reserved_accounts or []):
+                            local_files = await self._download_account_from_s3(s3_prefix)
+                            for rel_path, data in local_files.items():
+                                zipf.writestr(rel_path, data)
 
-            with open(archive_path, 'rb') as f:
-                archive_bytes = f.read()
+                with open(archive_path, 'rb') as f:
+                    archive_bytes = f.read()
 
-        # Сохраняем
-        if not order.delivery_info:
-            order.delivery_info = {}
-        order.delivery_info["password"] = password
-        order.status = OrderStatus.COMPLETED.value
+            # Обновляем заказ
+            if not order.delivery_info:
+                order.delivery_info = {}
+            order.delivery_info["password"] = password
+            order.status = OrderStatus.COMPLETED.value
 
-        await session.commit()
+        except Exception as e:
+            logger.error(f"Failed to build archive for order {order_id}: {e}", exc_info=True)
+            return None, ""
 
-        # === УДАЛЕНИЕ ИСПОЛЬЗОВАННЫХ АККАУНТОВ ИЗ S3 ===
+        # Удаление из S3 — вне транзакции
         try:
             for item in order.items:
                 for s3_prefix in (item.reserved_accounts or []):
-                    # Получаем список всех объектов по префиксу
                     response = self.storage.s3_client.list_objects_v2(
                         Bucket=self.storage.bucket,
                         Prefix=s3_prefix
                     )
-
                     if 'Contents' in response:
                         objects_to_delete = [{'Key': obj['Key']} for obj in response['Contents']]
-
                         self.storage.s3_client.delete_objects(
                             Bucket=self.storage.bucket,
                             Delete={'Objects': objects_to_delete}
                         )
-                        logger.info(f"Удалена папка аккаунта: {s3_prefix} ({len(objects_to_delete)} файлов)")
-                    else:
-                        logger.warning(f"Префикс {s3_prefix} пустой")
+                        logger.info(f"Deleted account folder: {s3_prefix}")
         except Exception as e:
-            logger.error(f"Не удалось удалить аккаунты из S3: {e}")
-        # ===============================================
+            logger.error(f"Failed to delete S3 accounts for order {order_id}: {e}")
 
         return archive_bytes, password
 

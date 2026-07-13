@@ -8,3 +8,4 @@ def create_app() -> FastAPI:
     #app.add_middleware(MaintenanceMiddleware)
     app.include_router(webhook_router)
     return app
+

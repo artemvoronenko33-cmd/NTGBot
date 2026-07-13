@@ -42,11 +42,10 @@ class OrderQueueService:
             return
 
         order_id = int(order_id_str)
-
         logger.info(f"Начинаем обработку заказа #{order_id}")
 
         try:
-            # Eager loading
+            # Загружаем заказ
             stmt = select(Order).options(
                 selectinload(Order.items).joinedload(OrderItem.product)
             ).where(Order.id == order_id)
@@ -57,11 +56,13 @@ class OrderQueueService:
             if not order or order.status not in [OrderStatus.PAID.value, OrderStatus.PARTIAL.value]:
                 return
 
+            # Резервирование аккаунтов
             reserved = await self.delivery_service.reserve_accounts_for_order(session, order_id)
 
             if reserved:
                 archive_bytes, password = await self.delivery_service.build_order_archive(session, order_id)
                 if archive_bytes:
+                    # Отправка — вне главной транзакции (чтобы не блокировать)
                     await self._send_order_to_user(order.user_id, order_id, archive_bytes, password)
                     order.status = OrderStatus.COMPLETED.value
                 else:
@@ -69,21 +70,55 @@ class OrderQueueService:
             else:
                 order.status = OrderStatus.PARTIAL.value
 
-            await session.commit()
+            # commit произойдёт в верхнем уровне (pay_from_balance)
 
         except Exception as e:
-            logger.exception(f"Ошибка обработки заказа #{order_id}")
-            await asyncio.sleep(2)
+            logger.exception(f"Критическая ошибка обработки заказа #{order_id}")
+            # Возвращаем заказ в очередь
+            await redis_client.rpush(self.queue_key, str(order_id))
+            await asyncio.sleep(5)
 
     async def _send_order_to_user(self, user_id: int, order_id: int, archive_bytes: bytes, password: str):
+        """Надёжная отправка заказа пользователю"""
         from app.bot.bot_instance import bot
-        try:
-            await bot.send_document(
-                chat_id=user_id,
-                document=BufferedInputFile(archive_bytes, filename=f"order_{order_id}.zip"),
-                caption=f"✅ Заказ #{order_id} готов!"
-            )
-            await asyncio.sleep(1.5)
-            await bot.send_message(user_id, f"🔑 Пароль: `{password}`", parse_mode="Markdown")
-        except Exception as e:
-            logger.error(f"Не удалось отправить заказ {order_id}: {e}")
+
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                # Отправка архива
+                await bot.send_document(
+                    chat_id=user_id,
+                    document=BufferedInputFile(archive_bytes, filename=f"order_{order_id}.zip"),
+                    caption=f"✅ Заказ #{order_id} готов!\n\n"
+                            f"📦 Архив с аккаунтами",
+                    disable_notification=False
+                )
+
+                await asyncio.sleep(1.5)
+
+                # Отправка пароля
+                await bot.send_message(
+                    user_id,
+                    f"🔑 Пароль архива: `{password}`\n\n"
+                    f"⚠️ Сохраните пароль! Без него открыть архив невозможно.",
+                    parse_mode="Markdown"
+                )
+
+                logger.info(f"Заказ #{order_id} успешно отправлен пользователю {user_id}")
+                return True
+
+            except Exception as e:
+                logger.error(f"Попытка {attempt + 1}/{max_retries} отправки заказа {order_id} не удалась: {e}")
+                if attempt < max_retries - 1:
+                    await asyncio.sleep(3 * (attempt + 1))  # экспоненциальная задержка
+                else:
+                    logger.critical(f"Не удалось отправить заказ {order_id} после {max_retries} попыток")
+                    # Здесь можно добавить уведомление админу
+                    try:
+                        await bot.send_message(
+                            settings.ADMIN_IDS[0],
+                            f"❌ Не удалось доставить заказ #{order_id} пользователю {user_id}"
+                        )
+                    except:
+                        pass
+                    return False

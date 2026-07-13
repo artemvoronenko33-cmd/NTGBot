@@ -351,149 +351,137 @@ async def pay_from_balance(callback: CallbackQuery):
         await callback.answer("🛒 Корзина пуста!", show_alert=True)
         return
 
-    # 🔐 Rate-limit проверка
+    # Rate-limit проверка
     if not await check_rate_limit(
             user_id,
             max_attempts=settings.PAYMENT_RATE_LIMIT_ATTEMPTS,
             window_seconds=settings.PAYMENT_RATE_LIMIT_WINDOW
     ):
-        await callback.answer(
-            "⚠️ Слишком много попыток. Подождите 1 минуту.",
-            show_alert=True
-        )
+        await callback.answer("⚠️ Слишком много попыток. Подождите 1 минуту.", show_alert=True)
         logger.warning("Rate limit hit for user %s", user_id)
-        log_rate_limit_hit(user_id, settings.PAYMENT_RATE_LIMIT_ATTEMPTS,
-                           settings.PAYMENT_RATE_LIMIT_WINDOW)
+        log_rate_limit_hit(user_id, settings.PAYMENT_RATE_LIMIT_ATTEMPTS, settings.PAYMENT_RATE_LIMIT_WINDOW)
         return
 
     await callback.answer()
     await callback.message.edit_text("⏳ Обрабатываем оплату...")
 
     async with async_session() as session:
-        try:
-            # 1. Считаем сумму
-            total_cents = 0
-            products_data = []
-
-            for item in cart_items:
-                stmt = select(Product).where(Product.id == item["product_id"])
-                prod = (await session.execute(stmt)).scalar_one_or_none()
-
-                if not prod:
-                    logger.error(f"Product {item['product_id']} not found during payment")
-                    await session.rollback()
-                    await callback.message.edit_text("❌ Один из товаров больше недоступен. Корзина очищена.")
-                    await clear_cart(user_id)
-                    return
-
-                total_cents += prod.price * item["qty"]
-                products_data.append((prod, item["qty"]))
-
-            total_usd = total_cents / 100
-
-            # 📊 Логируем начало платежа
-            log_payment_start(user_id, order_id=None, amount_usd=total_usd,
-                              payment_method="balance")
-
-            # 2. Списываем баланс через сервис (атомарно + лог + история)
-            new_balance = await record_transaction(
-                session=session,
-                user_id=user_id,
-                amount_cents=-total_cents,
-                transaction_type=TransactionType.ORDER_PAYMENT,
-                description="Оплата заказа (корзина)",
-                metadata={"cart_items": len(cart_items)},
-                order_id=None,
-                topup_id=None,
-                ip_address=None,
-            )
-
-            # 3. Создаём заказ
-            order = Order(
-                user_id=user_id,
-                status="paid",
-                total_price=total_usd,
-            )
-            session.add(order)
-            await session.flush()
-
-            # 4. Создаём позиции заказа
-            for prod, qty in products_data:
-                session.add(OrderItem(
-                    order_id=order.id,
-                    product_id=prod.id,
-                    product_name=prod.name,
-                    quantity=qty,
-                    price_at_purchase=prod.price / 100,
-                ))
-
-            # 5. Запись платежа
-            payment = Payment(
-                order_id=order.id,
-                user_id=user_id,
-                amount_usd=total_usd,
-                status="completed",
-                payment_method="balance",
-            )
-            session.add(payment)
-
-            await session.commit()
-
-            # ✅ Уведомление пользователя
-            await callback.message.edit_text(
-                f"✅ <b>Оплата прошла успешно!</b>\n\n"
-                f"📋 Заказ #{order.id}\n"
-                f"💵 Списано: ${total_usd:.2f}\n"
-                f"💳 Баланс: ${new_balance / 100:.2f}",
-            )
-            await notify_payment_success(user_id, order.id)
-
-            # 📊 Логируем успешный платёж
-            log_payment_success(user_id, order.id, total_usd, "balance", new_balance)
-
-            # === Добавляем заказ в очередь на выдачу ===
+        async with session.begin():  # Явная транзакция
             try:
-                from app.services.order_queue import OrderQueueService
-                from app.services.redis_cart import redis_client  # ← ПРЯМОЙ ИМПОРТ
+                # 1. Подсчёт суммы
+                total_cents = 0
+                products_data = []
 
-                queue_service = OrderQueueService()
-                await queue_service.enqueue_order(order.id)
-                logger.info(f"Заказ #{order.id} добавлен в очередь на выдачу")
-            except Exception as e:
-                logger.error(f"Не удалось добавить заказ {order.id} в очередь: {e}")
-            # ============================================
+                for item in cart_items:
+                    stmt = select(Product).where(Product.id == item["product_id"])
+                    prod = (await session.execute(stmt)).scalar_one_or_none()
 
-            # 🔔 Админ-уведомление для крупных платежей
-            if total_usd >= settings.LARGE_PAYMENT_THRESHOLD_USD:
-                await notify_admin_large_payment(
+                    if not prod:
+                        raise ValueError(f"Товар {item['product_id']} больше недоступен.")
+
+                    total_cents += prod.price * item["qty"]
+                    products_data.append((prod, item["qty"]))
+
+                total_usd = total_cents / 100
+
+                # Логируем начало платежа
+                log_payment_start(user_id, order_id=None, amount_usd=total_usd, payment_method="balance")
+
+                # 2. Создание заказа
+                order = Order(
                     user_id=user_id,
-                    order_id=order.id,
-                    amount_usd=total_usd,
-                    username=callback.from_user.username,
+                    status="paid",
+                    total_price=total_usd,
                 )
-                # 📊 Логируем уведомление администратора
-                log_large_payment_admin_notified(user_id, order.id, total_usd,
-                                                 callback.from_user.username or "unknown")
+                session.add(order)
+                await session.flush()
 
-            logger.info(
-                "Balance payment completed: user=%s order=%s amount=%.2f",
-                user_id, order.id, total_usd
-            )
+                # 3. Списание баланса
+                new_balance = await record_transaction(
+                    session=session,
+                    user_id=user_id,
+                    amount_cents=-total_cents,
+                    transaction_type=TransactionType.ORDER_PAYMENT,
+                    description="Оплата заказа (корзина)",
+                    metadata={"cart_items": len(cart_items)},
+                    order_id=order.id,  # теперь order.id уже есть
+                    commit=False  # важно!
+                )
 
-        except ValueError as e:
-            await session.rollback()
-            logger.warning("Payment failed for user %s: %s", user_id, e)
-            # 📊 Логируем ошибку платежа
-            log_payment_failed(user_id, order_id=None, amount_usd=total_cents / 100,
-                               payment_method="balance", error_reason=str(e))
-            await callback.message.edit_text(f"❌ Ошибка: {e}")
-        except Exception as e:
-            await session.rollback()
-            logger.exception("Unexpected error during balance payment: user=%s", user_id)
-            # 📊 Логируем непредвиденную ошибку
-            log_payment_failed(user_id, order_id=None, amount_usd=total_cents / 100,
-                               payment_method="balance", error_reason=f"Unexpected: {str(e)}")
-            await callback.message.edit_text("❌ Внутренняя ошибка. Попробуйте позже.")
+
+
+                # 4. Позиции заказа
+                for prod, qty in products_data:
+                    session.add(OrderItem(
+                        order_id=order.id,
+                        product_id=prod.id,
+                        product_name=prod.name,
+                        quantity=qty,
+                        price_at_purchase=prod.price / 100,
+                    ))
+
+                # 5. Запись платежа
+                payment = Payment(
+                    order_id=order.id,
+                    user_id=user_id,
+                    amount_usd=total_usd,
+                    status="completed",
+                    payment_method="balance",
+                )
+                session.add(payment)
+
+                # Транзакция завершена успешно
+                await session.commit()
+
+                # === Действия после успешной транзакции ===
+                await callback.message.edit_text(
+                    f"✅ <b>Оплата прошла успешно!</b>\n\n"
+                    f"📋 Заказ #{order.id}\n"
+                    f"💵 Списано: ${total_usd:.2f}\n"
+                    f"💳 Баланс: ${new_balance / 100:.2f}",
+                )
+
+                await notify_payment_success(user_id, order.id)
+
+                log_payment_success(user_id, order.id, total_usd, "balance", new_balance)
+
+                # Добавление в очередь на выдачу
+                try:
+                    from app.services.order_queue import OrderQueueService
+                    queue_service = OrderQueueService()
+                    await queue_service.enqueue_order(order.id)
+                    logger.info(f"Заказ #{order.id} добавлен в очередь")
+                except Exception as e:
+                    logger.error(f"Не удалось добавить заказ {order.id} в очередь: {e}")
+
+                # Уведомление админов при крупном платеже
+                if total_usd >= settings.LARGE_PAYMENT_THRESHOLD_USD:
+                    await notify_admin_large_payment(
+                        user_id=user_id,
+                        order_id=order.id,
+                        amount_usd=total_usd,
+                        username=callback.from_user.username,
+                    )
+                    log_large_payment_admin_notified(
+                        user_id, order.id, total_usd, callback.from_user.username or "unknown"
+                    )
+
+                logger.info("Balance payment completed: user=%s order=%s amount=%.2f",
+                           user_id, order.id, total_usd)
+
+            except ValueError as e:
+                await session.rollback()
+                logger.warning("Payment validation failed for user %s: %s", user_id, e)
+                log_payment_failed(user_id, None, total_cents / 100, "balance", str(e))
+                await callback.message.edit_text(f"❌ {e}")
+                return
+
+            except Exception as e:
+                await session.rollback()
+                logger.exception("Unexpected error during balance payment for user %s", user_id)
+                log_payment_failed(user_id, None, total_cents / 100, "balance", f"Unexpected: {str(e)}")
+                await callback.message.edit_text("❌ Внутренняя ошибка. Попробуйте позже.")
+                return
 
     # Очищаем корзину только после успешной оплаты
     await clear_cart(user_id)
@@ -767,98 +755,76 @@ async def topup_amount_received(message: Message, state: FSMContext):
     await state.clear()
     await message.answer("⏳ Получаем курс и генерируем адрес...")
 
-    # Получаем актуальный курс USD за 1 единицу монеты
-    try:
-        try:
-            price_usd = await asyncio.wait_for(
-                get_price_usd(ticker),
-                timeout=5.0
-            )
-        except asyncio.TimeoutError:
-            logger.error("Timeout getting price for ticker: %s", ticker)
-            await message.answer(
-                "⏱️ Сервис курсов временно недоступен. Попробуйте позже.",
-                reply_markup=topup_currency_kb(),
-            )
-            return
-    except Exception as e:
-        logger.error("rates error: %s", e)
-        await message.answer(
-            "❌ Не удалось получить курс. Попробуйте чуть позже.",
-            reply_markup=topup_currency_kb(),
-        )
-        return
-
-    # Применяем комиссию к сумме в USD, затем конвертируем в crypto
-    fee_mul = 1 + settings.TOPUP_FEE_PERCENT / 100
-    pay_usd = amount * fee_mul
-    amount_crypto = usd_to_crypto(pay_usd, price_usd, decimals=8)
-    amount_str = f"{amount_crypto:.8f}"
-
+    # === ОСНОВНАЯ ТРАНЗАКЦИЯ ===
     async with async_session() as session:
-        topup = TopUp(
-            user_id=message.from_user.id,
-            amount_usd=amount,
-            amount_usdt=amount_crypto,
-            rate_usd=price_usd,
-            address="",
-            label="__pending__",
-            status="pending",
-        )
-        session.add(topup)
-        await session.flush()
-
-        label = f"topup_{topup.id}"
-        try:
+        async with session.begin():   # Начало атомарной транзакции
             try:
-                addr = await asyncio.wait_for(
-                    generate_address(label, currency=ticker),
-                    timeout=10.0
+                # Получаем курс
+                price_usd = await asyncio.wait_for(
+                    get_price_usd(ticker), timeout=5.0
                 )
-            except asyncio.TimeoutError:
-                logger.error("Timeout generating address for ticker: %s", ticker)
+
+                # Расчёт с комиссией
+                fee_mul = 1 + settings.TOPUP_FEE_PERCENT / 100
+                pay_usd = amount * fee_mul
+                amount_crypto = usd_to_crypto(pay_usd, price_usd, decimals=8)
+                amount_str = f"{amount_crypto:.8f}"
+
+                # Создаём запись TopUp
+                topup = TopUp(
+                    user_id=message.from_user.id,
+                    amount_usd=amount,
+                    amount_usdt=amount_crypto,
+                    rate_usd=price_usd,
+                    address="",
+                    label="__pending__",
+                    status="pending",
+                )
+                session.add(topup)
+                await session.flush()  # Получаем id
+
+                label = f"topup_{topup.id}"
+
+                # Генерируем адрес
+                addr = await asyncio.wait_for(
+                    generate_address(label, currency=ticker), timeout=10.0
+                )
+
+                topup.address = addr.address
+                topup.label = label
+
+                # Логирование
+                log_topup_initiated(
+                    message.from_user.id,
+                    topup.id,
+                    amount,
+                    ticker,
+                    addr.address
+                )
+
+                await session.commit()  # Фиксируем всё атомарно
+
+            except asyncio.TimeoutError as e:
                 await session.rollback()
+                logger.error(f"Timeout during topup: {e}")
                 await message.answer(
-                    f"⏱️ <b>{cur_name}</b> сервис временно недоступен.\n\n"
-                    "Пожалуйста, выберите другую монету:",
+                    "⏱️ Сервис временно недоступен. Попробуйте позже.",
                     reply_markup=topup_currency_kb(),
                 )
                 return
-        except RuntimeError as e:
-            err = str(e)
-            logger.error("generate_address error: %s", err)
-            await session.rollback()
-            if "ip_not_allowed" in err:
+            except Exception as e:
+                await session.rollback()
+                logger.error(f"Topup creation failed: {e}", exc_info=True)
                 await message.answer(
-                    f"⚠️ <b>{cur_name}</b> временно недоступна.\n\n"
-                    "Пожалуйста, выберите другую монету:",
+                    "❌ Не удалось создать заявку на пополнение. Попробуйте позже.",
                     reply_markup=topup_currency_kb(),
                 )
-            elif "currency_not_found" in err:
-                await message.answer(
-                    "❌ Монета не поддерживается. Выберите другую:",
-                    reply_markup=topup_currency_kb(),
-                )
-            else:
-                await message.answer("❌ Ошибка платёжного сервиса. Попробуйте позже.")
-            return
-        except Exception as e:
-            logger.error("generate_address unexpected error: %s", e)
-            await session.rollback()
-            await message.answer("❌ Не удалось создать адрес. Попробуйте позже.")
-            return
+                return
 
-        topup.address = addr.address
-        topup.label = label
-        await session.commit()
+    # === ВНЕШНИЙ КОД (после успешной транзакции) ===
+    request_num = 1_000_000_000 + topup.id
+    address = addr.address
 
-        # 📊 Логируем инициирование пополнения
-        log_topup_initiated(message.from_user.id, topup.id, amount, ticker, addr.address)
-
-        request_num = 1_000_000_000 + topup.id
-        address = addr.address
-
-    # Форматируем курс компактно (много знаков для дешёвых монет)
     if price_usd >= 1:
         rate_str = f"${price_usd:,.2f}"
     else:
@@ -874,12 +840,11 @@ async def topup_amount_received(message: Message, state: FSMContext):
         f"❗️Пожалуйста, переведите минимум {amount_str} {ticker}!\n"
         f"❗️Если вы отправите меньше {amount_str} — зачисление не состоится!\n\n"
         f"⚠️ <b>РЕКВИЗИТЫ ДЕЙСТВИТЕЛЬНЫ ТОЛЬКО ДЛЯ ОДНОГО ПЛАТЕЖА</b> ❗️\n"
-        f"❌❌❌ Если вы отправите меньше {amount_str}, деньги будут потеряны и мы не сможем помочь!"
+        f"❌❌❌ Если вы отправите меньше {amount_str}, деньги будут потеряны!"
     )
 
     photo = BufferedInputFile(_make_qr(address), filename="qr.png")
     await message.answer_photo(photo, caption=text)
-
 
 # ==================== ОТЛАДКА: ловим ВСЕ остальные callback'и ====================
 # ==================== Кроме worker_ ====================

@@ -4,12 +4,15 @@ import json
 import time
 from dataclasses import dataclass
 
+import logging
+
 import httpx
 
 from config import settings
 
 _BASE = "https://api.westwallet.io"
 
+logger = logging.getLogger(__name__)
 
 def _headers(data: dict | None) -> dict:
     ts = int(time.time())
@@ -52,18 +55,28 @@ async def create_invoice(
         "description": f"Order #{order_id}",
         "ttl": 90,
     }
-    async with httpx.AsyncClient() as client:
-        resp = await client.post(
-            f"{_BASE}/address/create_invoice",
-            content=json.dumps(data, ensure_ascii=False),
-            headers=_headers(data),
-            timeout=15,
-        )
-    resp.raise_for_status()
-    body = resp.json()
-    if body.get("error") != "ok":
-        raise RuntimeError(f"WestWallet: {body.get('error')}")
-    return InvoiceResult(token=body["token"], url=body["url"])
+
+    async with httpx.AsyncClient(timeout=15.0) as client:
+        try:
+            resp = await client.post(
+                f"{_BASE}/address/create_invoice",
+                content=json.dumps(data, ensure_ascii=False),
+                headers=_headers(data),
+            )
+            resp.raise_for_status()
+            body = resp.json()
+
+            if body.get("error") != "ok":
+                raise RuntimeError(f"WestWallet error: {body.get('error')}")
+
+            return InvoiceResult(token=body["token"], url=body["url"])
+
+        except httpx.TimeoutException:
+            logger.error("WestWallet create_invoice timeout for order %s", order_id)
+            raise
+        except Exception as e:
+            logger.error("WestWallet create_invoice failed for order %s: %s", order_id, e)
+            raise
 
 
 @dataclass

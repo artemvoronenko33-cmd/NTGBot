@@ -1,15 +1,23 @@
 # app/bot/handlers_admin.py
+import asyncio
 import logging
+from datetime import datetime
+
+import httpx
 from aiogram import Router
 from aiogram.fsm.context import FSMContext
 from aiogram.types import Message
 from aiogram.filters import Command, StateFilter
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.db.engine import async_session
 from app.db.models import User, OrderStatus, Order, OrderItem, Payment
 from app.db.models.order import OrderStatusHistory
+from app.services import storage_service
+from app.services.payment import generate_address
+from app.services.redis_cart import redis_client
 from config import settings  # или откуда импортируется settings
-from sqlalchemy import text, select, delete
+from sqlalchemy import text, select, delete, func
 from app.bot.keyboards import get_admin_menu, get_cancel_kb
 
 from app.services.maintenance import MaintenanceService
@@ -258,3 +266,84 @@ async def cmd_maintenance_off(message: Message):
 
     await MaintenanceService.disable_maintenance()
     await message.answer("✅ Сервисный режим ВЫКЛЮЧЕН")
+
+
+@router.message(Command("health"))
+async def cmd_full_health(message: Message):
+    if message.from_user.id not in settings.ADMIN_IDS:
+        await message.answer("Нет доступа.")
+        return
+
+    await message.answer("🔍 Полная диагностика системы...")
+
+    status = {
+        "bot": "✅ Работает",
+        "database": "❌",
+        "redis": "❌",
+        "westwallet": "❌",
+        "storage": "❌",
+        "webapi": "❌",
+    }
+
+    details = []
+
+    # 1. База данных
+    try:
+        async with async_session() as session:
+            await session.execute(text("SELECT 1"))
+            users = (await session.execute(select(func.count(User.id)))).scalar()
+        status["database"] = "✅ OK"
+        details.append(f"• БД: {users} пользователей")
+    except Exception as e:
+        status["database"] = f"❌ {str(e)[:80]}"
+
+    # 2. Redis
+    try:
+        await redis_client.ping()
+        status["redis"] = "✅ OK"
+        details.append("• Redis: подключён")
+    except Exception:
+        status["redis"] = "❌ Нет связи"
+
+    # 3. WestWallet
+    try:
+        await generate_address("health_test", currency="USDTTRC")
+        status["westwallet"] = "✅ OK"
+    except Exception:
+        status["westwallet"] = "⚠️ Проблемы с API"
+
+    # 4. Storage
+    try:
+        if hasattr(storage_service, 's3_client'):
+            storage_service.s3_client.list_objects_v2(Bucket=storage_service.bucket, MaxKeys=1)
+            status["storage"] = "✅ OK"
+    except Exception:
+        status["storage"] = "⚠️ Проблемы с S3"
+
+    # 5. Web API (более надёжная проверка)
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as client:
+            resp = await client.get(f"http://127.0.0.1:{settings.WEB_API_PORT}/health", follow_redirects=True)
+            if resp.status_code == 200:
+                status["webapi"] = "✅ OK"
+                details.append("• WebAPI: отвечает")
+            else:
+                status["webapi"] = f"⚠️ HTTP {resp.status_code}"
+    except httpx.ConnectError:
+        status["webapi"] = "❌ Процесс не запущен (порт 8001)"
+    except Exception as e:
+        status["webapi"] = f"❌ Ошибка соединения: {str(e)[:60]}"
+    except Exception:
+        status["webapi"] = "❌ Не отвечает (порт 8001)"
+
+    # Итоговый отчёт
+    report = "📊 **Состояние системы**\n\n"
+    for k, v in status.items():
+        report += f"{v} **{k.upper()}**\n"
+
+    if details:
+        report += "\n" + "\n".join(details)
+
+    report += f"\n\n🕒 {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}"
+
+    await message.answer(report, parse_mode="Markdown")

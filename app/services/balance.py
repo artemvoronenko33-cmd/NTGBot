@@ -33,15 +33,16 @@ async def check_rate_limit(user_id: int, max_attempts: int = 3, window_seconds: 
 
 
 async def record_transaction(
-        session: AsyncSession,
-        user_id: int,
-        amount_cents: int,
-        transaction_type: TransactionType,
-        description: str | None = None,
-        order_id: int | None = None,
-        topup_id: int | None = None,
-        metadata: dict | None = None,
-        ip_address: str | None = None,
+    session: AsyncSession,
+    user_id: int,
+    amount_cents: int,
+    transaction_type: TransactionType,
+    description: str | None = None,
+    order_id: int | None = None,
+    topup_id: int | None = None,
+    metadata: dict | None = None,
+    ip_address: str | None = None,
+    commit: bool = False,   # новый параметр
 ) -> int:
     """
     Записывает транзакцию и возвращает новый баланс пользователя.
@@ -81,6 +82,7 @@ async def record_transaction(
         "BalanceTransaction: user=%s type=%s amount_cents=%d balance_after=%d order_id=%s",
         user_id, transaction_type.value, amount_cents, balance_after, order_id
     )
+
 
     return balance_after
 

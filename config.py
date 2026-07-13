@@ -39,6 +39,8 @@ class Settings(BaseSettings):
     USE_WEBHOOK: bool = False
     WEBHOOK_URL: str = ""
 
+    WEB_API_PORT: int = 8001
+
     # ВАЛЮТА
     CURRENCY_SYMBOL: str = "$"  # Символ для отображения (₽, $, €, ₸)
     CURRENCY_ISO: str = "USD"  # Код для платёжных систем (RUB, USD, EUR, KZT)

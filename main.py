@@ -115,18 +115,32 @@ async def run_bot() -> None:
 async def order_processor():
     from app.db.engine import async_session
     queue_service = OrderQueueService()
+    error_count = 0
 
     while True:
         try:
             async with async_session() as session:
                 await queue_service.process_single_order(session)
-                await asyncio.sleep(2)
+            error_count = 0  # сброс счётчика при успехе
+            await asyncio.sleep(2)
         except asyncio.CancelledError:
-            logger.info("Order processor остановлен")
             break
         except Exception as e:
-            logger.error(f"Error in order processor: {e}", exc_info=True)
-            await asyncio.sleep(10)
+            error_count += 1
+            logger.error(f"Ошибка order_processor (попытка {error_count}): {e}", exc_info=True)
+
+            if error_count > 5:
+                # Уведомление админа
+                try:
+                    from app.bot.bot_instance import bot
+                    await bot.send_message(
+                        settings.ADMIN_IDS[0],
+                        f"⚠️ order_processor упал {error_count} раз подряд!"
+                    )
+                except:
+                    pass
+
+            await asyncio.sleep(20)  # длинная пауза
 
 
 # ====================== MAIN ======================
