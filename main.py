@@ -113,34 +113,44 @@ async def run_bot() -> None:
 
 
 async def order_processor():
+    """Надёжная обработка заказов с автоперезапуском и уведомлениями"""
     from app.db.engine import async_session
     queue_service = OrderQueueService()
     error_count = 0
+    max_errors_before_cooldown = 5
+    cooldown_seconds = 300  # 5 минут
 
     while True:
         try:
             async with async_session() as session:
-                await queue_service.process_single_order(session)
-            error_count = 0  # сброс счётчика при успехе
-            await asyncio.sleep(2)
+                processed = await queue_service.process_single_order(session)
+
+            error_count = 0
+            await asyncio.sleep(2 if processed else 5)  # разная пауза
+
         except asyncio.CancelledError:
+            logger.info("Order processor остановлен gracefully")
             break
         except Exception as e:
             error_count += 1
-            logger.error(f"Ошибка order_processor (попытка {error_count}): {e}", exc_info=True)
+            logger.error(
+                f"Ошибка order_processor (попытка {error_count}/{max_errors_before_cooldown}): {e}",
+                exc_info=True
+            )
 
-            if error_count > 5:
-                # Уведомление админа
+            # Уведомление админа
+            if error_count >= max_errors_before_cooldown:
                 try:
                     from app.bot.bot_instance import bot
                     await bot.send_message(
                         settings.ADMIN_IDS[0],
-                        f"⚠️ order_processor упал {error_count} раз подряд!"
+                        f"🚨 order_processor упал {error_count} раз подряд!\n"
+                        f"Последняя ошибка: {str(e)[:500]}"
                     )
-                except:
-                    pass
+                except Exception as notify_err:
+                    logger.error(f"Failed to notify admin: {notify_err}")
 
-            await asyncio.sleep(20)  # длинная пауза
+            await asyncio.sleep(cooldown_seconds if error_count >= max_errors_before_cooldown else 20)
 
 
 # ====================== MAIN ======================

@@ -9,6 +9,7 @@ from aiogram.types import BufferedInputFile
 from app.db.models import Order, OrderStatus, OrderItem
 from app.services.order_delivery import OrderDeliveryService
 from app.services.redis_cart import redis_client
+from config import settings
 
 logger = logging.getLogger(__name__)
 
@@ -36,16 +37,24 @@ class OrderQueueService:
         logger.info(f"В очередь добавлено {len(order_ids)} заказов")
 
     async def process_single_order(self, session: AsyncSession):
-        """Обрабатывает один заказ из очереди"""
-        order_id_str = await redis_client.lpop(self.queue_key)
-        if not order_id_str:
+        """Обрабатывает один заказ с Redis Lock и корректным управлением очередью"""
+        # ==================== REDIS LOCK ====================
+        lock_key = "order:queue:global_lock"
+        locked = await redis_client.set(lock_key, "1", nx=True, ex=60)  # 60 секунд таймаут
+        if not locked:
+            logger.debug("Другой обработчик уже работает с очередью")
             return
 
-        order_id = int(order_id_str)
-        logger.info(f"Начинаем обработку заказа #{order_id}")
-
         try:
-            # Загружаем заказ
+            # ==================== БЕРЁМ ЗАКАЗ ИЗ ОЧЕРЕДИ ====================
+            order_id_str = await redis_client.lpop(self.queue_key)
+            if not order_id_str:
+                return
+
+            order_id = int(order_id_str)
+            logger.info(f"Начинаем обработку заказа #{order_id}")
+
+            # ==================== ЗАГРУЗКА ЗАКАЗА ====================
             stmt = select(Order).options(
                 selectinload(Order.items).joinedload(OrderItem.product)
             ).where(Order.id == order_id)
@@ -54,29 +63,43 @@ class OrderQueueService:
             order = result.scalar_one_or_none()
 
             if not order or order.status not in [OrderStatus.PAID.value, OrderStatus.PARTIAL.value]:
+                logger.info(f"Заказ #{order_id} пропущен (статус: {order.status if order else 'None'})")
                 return
 
-            # Резервирование аккаунтов
+            # ==================== РЕЗЕРВИРОВАНИЕ ====================
             reserved = await self.delivery_service.reserve_accounts_for_order(session, order_id)
 
-            if reserved:
-                archive_bytes, password = await self.delivery_service.build_order_archive(session, order_id)
-                if archive_bytes:
-                    # Отправка — вне главной транзакции (чтобы не блокировать)
-                    await self._send_order_to_user(order.user_id, order_id, archive_bytes, password)
-                    order.status = OrderStatus.COMPLETED.value
-                else:
-                    order.status = OrderStatus.PARTIAL.value
-            else:
+            if not reserved:
                 order.status = OrderStatus.PARTIAL.value
+                await session.commit()
+                return
 
-            # commit произойдёт в верхнем уровне (pay_from_balance)
+            # ==================== СБОРКА АРХИВА ====================
+            archive_bytes, password = await self.delivery_service.build_order_archive(session, order_id)
+
+            if not archive_bytes:
+                order.status = OrderStatus.PARTIAL.value
+                await session.commit()
+                return
+
+            # ==================== ОТПРАВКА ПОЛЬЗОВАТЕЛЮ ====================
+            sent = await self._send_order_to_user(order.user_id, order_id, archive_bytes, password)
+
+            # ==================== ФИНАЛЬНЫЙ СТАТУС ====================
+            order.status = OrderStatus.COMPLETED.value if sent else OrderStatus.PARTIAL.value
+            await session.commit()
+
+            logger.info(f"✅ Заказ #{order_id} успешно обработан и завершён")
 
         except Exception as e:
             logger.exception(f"Критическая ошибка обработки заказа #{order_id}")
-            # Возвращаем заказ в очередь
+            # Возвращаем заказ в конец очереди
             await redis_client.rpush(self.queue_key, str(order_id))
             await asyncio.sleep(5)
+
+        finally:
+            # ==================== СНЯТИЕ БЛОКИРОВКИ ====================
+            await redis_client.delete(lock_key)
 
     async def _send_order_to_user(self, user_id: int, order_id: int, archive_bytes: bytes, password: str):
         """Надёжная отправка заказа пользователю"""

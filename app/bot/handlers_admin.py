@@ -9,11 +9,13 @@ from aiogram.fsm.context import FSMContext
 from aiogram.types import Message
 from aiogram.filters import Command, StateFilter
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.db.engine import async_session
-from app.db.models import User, OrderStatus, Order, OrderItem, Payment
+from app.db.models import User, OrderStatus, Order, OrderItem, Payment, AccountItem, Product
 from app.db.models.order import OrderStatusHistory
 from app.services import storage_service
+from app.services.order_delivery import OrderDeliveryService
 from app.services.payment import generate_address
 from app.services.redis_cart import redis_client
 from config import settings  # или откуда импортируется settings
@@ -138,74 +140,98 @@ async def cmd_workers(message: Message, session: AsyncSession):
     await message.answer(text_msg, parse_mode=None)
 
 @router.message(Command("deficit"))
-async def show_deficit(message: Message, session: AsyncSession):
-    """Сводка дефицита по товарам"""
+async def cmd_deficit(message: Message):
+    """Показывает дефицит аккаунтов по продуктам"""
+    if message.from_user.id not in settings.ADMIN_IDS:
+        await message.answer("⛔ Нет доступа.")
+        return
+
     try:
-        sql = """
-            SELECT 
-                p.name as product_name,
-                c.name as category_name,
-                COUNT(ai.id) as available,
-                COALESCE(SUM(oi.quantity - oi.delivered_quantity), 0) as needed
-            FROM products p
-            JOIN categories c ON p.category_id = c.id
-            LEFT JOIN account_items ai 
-                ON ai.product_id = p.id AND ai.is_reserved = false
-            LEFT JOIN order_items oi ON oi.product_id = p.id
-            GROUP BY p.id, p.name, c.name
-            HAVING COALESCE(SUM(oi.quantity - oi.delivered_quantity), 0) > 0
-        """
+        text = "📉 <b>Дефицит аккаунтов:</b>\n\n"
 
-        result = await session.execute(text(sql))
-        rows = result.all()
+        async with async_session() as session:
+            # Нужное количество по продуктам в очереди
+            needed_stmt = select(
+                OrderItem.product_id,
+                func.sum(OrderItem.quantity - func.coalesce(OrderItem.delivered_quantity, 0)).label("needed")
+            ).join(Order).where(
+                Order.status.in_([OrderStatus.PAID.value, OrderStatus.PARTIAL.value])
+            ).group_by(OrderItem.product_id)
 
-        if not rows:
-            await message.answer("✅ Дефицита нет. Все заказы могут быть выполнены.")
-            return
+            needed_result = await session.execute(needed_stmt)
 
-        response_text = "📉 <b>Дефицит аккаунтов:</b>\n\n"
-        for row in rows:
-            response_text += f"📦 {row.product_name} ({row.category_name})\n"
-            response_text += f"   Нужно: {row.needed} | В наличии: {row.available or 0}\n\n"
+            for row in needed_result:
+                product_id = row.product_id
+                needed = row.needed or 0
 
-        await message.answer(response_text, parse_mode="HTML")
+                # Свободные аккаунты
+                free_stmt = select(func.count()).select_from(AccountItem).where(
+                    AccountItem.product_id == product_id,
+                    AccountItem.status == "free"
+                )
+                free_count = (await session.execute(free_stmt)).scalar() or 0
 
-    except Exception as e:
-        logger.exception("Error in deficit command")
-        await message.answer("❌ Ошибка при получении сводки.")
+                # Название продукта
+                prod = await session.get(Product, product_id)
+                name = prod.name if prod else f"Product {product_id}"
 
-@router.message(Command("queue_status"))
-async def queue_status(message: Message, session: AsyncSession):
-    """Статус очереди заказов (для админа)"""
-    try:
-        # Заказы в обработке
-        stmt = select(Order).where(
-            Order.status.in_([OrderStatus.PAID.value, OrderStatus.PROCESSING.value, OrderStatus.PARTIAL.value])
-        ).order_by(Order.created_at)
+                text += f"📦 <b>{name}</b>\nНужно: <b>{needed}</b> | В наличии: <b>{free_count}</b>\n\n"
 
-        result = await session.execute(stmt)
-        orders = result.scalars().all()
-
-        if not orders:
-            await message.answer("📭 Очередь пуста.")
-            return
-
-        text = "📋 <b>Очередь заказов:</b>\n\n"
-        for order in orders:
-            progress = order.delivery_info.get("overall", 0) if order.delivery_info else 0
-            text += f"Заказ #{order.id} | {order.status.upper()}\n"
-            text += f"   Пользователь: {order.user_id}\n"
-            text += f"   Прогресс: {progress}%\n"
-            if order.delivery_info and "items" in order.delivery_info:
-                for pid, info in order.delivery_info["items"].items():
-                    text += f"   • {info.get('product_name', pid)}: {info.get('delivered', 0)}/{info.get('needed', 0)}\n"
-            text += "\n"
+            if not text.endswith("Дефицит аккаунтов:</b>\n\n"):
+                text += "Дефицита нет."
 
         await message.answer(text, parse_mode="HTML")
 
     except Exception as e:
-        logger.exception("Error in queue_status")
-        await message.answer("❌ Ошибка при получении очереди.")
+        logger.exception("Ошибка в /deficit")
+        await message.answer("❌ Ошибка при расчёте дефицита.")
+
+@router.message(Command("queue_status"))
+async def cmd_queue_status(message: Message):
+    """Показывает актуальное состояние очереди заказов"""
+    if message.from_user.id not in settings.ADMIN_IDS:
+        await message.answer("⛔ Нет доступа.")
+        return
+
+    try:
+        text = "📋 <b>Очередь заказов:</b>\n\n"
+
+        async with async_session() as session:
+            stmt = select(Order).options(
+                selectinload(Order.items)
+            ).where(
+                Order.status.in_([OrderStatus.PAID.value, OrderStatus.PARTIAL.value])
+            ).order_by(Order.created_at.asc()).limit(30)
+
+            result = await session.execute(stmt)
+            orders = result.scalars().all()
+
+            if not orders:
+                text += "Очередь пуста."
+            else:
+                for order in orders:
+                    total_needed = sum(item.quantity for item in order.items)
+                    total_delivered = sum(getattr(item, 'delivered_quantity', 0) or 0 for item in order.items)
+                    progress = int((total_delivered / total_needed * 100)) if total_needed > 0 else 0
+
+                    items_text = ""
+                    for item in order.items:
+                        name = getattr(item, 'product_name', f"ID{item.product_id}")
+                        delivered = getattr(item, 'delivered_quantity', 0) or 0
+                        items_text += f"• {name}: <b>{delivered}/{item.quantity}</b>\n"
+
+                    text += (
+                        f"Заказ <b>#{order.id}</b> | {order.status.upper()}\n"
+                        f"👤 {order.user_id}\n"
+                        f"Прогресс: <b>{progress}%</b>\n"
+                        f"{items_text}\n"
+                    )
+
+        await message.answer(text, parse_mode="HTML")
+
+    except Exception as e:
+        logger.exception("Ошибка в /queue_status")
+        await message.answer("❌ Ошибка при получении статуса очереди.")
 
 
 @router.message(Command("delete_orders"))
@@ -347,3 +373,65 @@ async def cmd_full_health(message: Message):
     report += f"\n\n🕒 {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}"
 
     await message.answer(report, parse_mode="Markdown")
+
+@router.message(Command("sync_accounts"))
+async def cmd_sync_accounts(message: Message):
+    """Синхронизация БД ↔ S3 + группировка зарезервированных аккаунтов по заказу"""
+    if message.from_user.id not in settings.ADMIN_IDS:
+        await message.answer("⛔ Нет доступа.")
+        return
+
+    await message.answer("🔄 Выполняю сверку и анализ...")
+
+    try:
+        delivery = OrderDeliveryService()
+        deleted_count = 0
+        reserved_by_order = {}  # order_id -> list of accounts
+
+        async with async_session() as session:
+            stmt = select(AccountItem).where(
+                AccountItem.status.in_(["free", "reserved"])
+            ).limit(500)
+
+            result = await session.execute(stmt)
+            accounts = result.scalars().all()
+
+            for acc in accounts:
+                file_count = await delivery._get_file_count(acc.s3_prefix)
+
+                if file_count == 0:
+                    await delivery._move_to_lost_empty(acc.s3_prefix)
+                    await session.delete(acc)
+                    deleted_count += 1
+                elif acc.status == "reserved" and acc.reserved_for_order_id:
+                    order_id = acc.reserved_for_order_id
+                    if order_id not in reserved_by_order:
+                        reserved_by_order[order_id] = []
+                    reserved_by_order[order_id].append({
+                        "prefix": acc.s3_prefix,
+                        "files": file_count
+                    })
+
+            await session.commit()
+
+        # ==================== ФОРМИРОВАНИЕ ОТВЕТА ====================
+        text = f"✅ <b>Синхронизация завершена</b>\n\n"
+        text += f"Удалено пустых аккаунтов: <b>{deleted_count}</b>\n\n"
+
+        if reserved_by_order:
+            text += f"<b>Зарезервированные аккаунты:</b>\n\n"
+            # Сортируем по номеру заказа
+            for order_id in sorted(reserved_by_order.keys()):
+                accounts_list = reserved_by_order[order_id]
+                text += f"📋 <b>Заказ #{order_id}</b> — {len(accounts_list)} аккаунтов\n"
+                for acc in accounts_list:
+                    text += f"   📦 <code>{acc['prefix']}</code> ({acc['files']} файлов)\n"
+                text += "\n"
+        else:
+            text += "Зарезервированных аккаунтов нет."
+
+        await message.answer(text, parse_mode="HTML")
+
+    except Exception as e:
+        logger.exception("Ошибка в /sync_accounts")
+        await message.answer("❌ Произошла ошибка при сверке.")
