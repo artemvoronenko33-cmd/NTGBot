@@ -311,12 +311,12 @@ async def clear_cart_handler(callback: CallbackQuery):
     await callback.answer()
 
 
-# ==================== Назад ====================
+# ==================== Назад к категориям ====================
 @router.callback_query(F.data == "back_to_cats")
-async def back_to_categories(callback: CallbackQuery):
+async def back_to_categories(callback: CallbackQuery, session: AsyncSession):
     logger.debug("Navigating back to categories")
     await callback.message.delete()
-    await show_categories(callback.message)
+    await show_categories(callback.message, session)
     await callback.answer()
 
 # ==================== Оплата с баланса ====================
