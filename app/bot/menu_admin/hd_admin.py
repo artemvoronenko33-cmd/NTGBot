@@ -1,32 +1,22 @@
-# app/bot/handlers_admin.py
-import asyncio
+# app/bot/hd_admin.py
 import logging
-from datetime import datetime
 
-import httpx
 from aiogram import Router, F
 from aiogram.fsm.context import FSMContext
-from aiogram.types import Message, CallbackQuery, ReplyKeyboardRemove
+from aiogram.types import Message, ReplyKeyboardRemove
 from aiogram.filters import Command, StateFilter
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import selectinload
 
-from app.bot.cmd_admin import cmd_workers, cmd_queue_status, cmd_deficit, cmd_maintenance_off, cmd_maintenance_on, \
+from app.bot.menu_admin.cmd_admin import cmd_workers, cmd_queue_status, cmd_deficit, cmd_maintenance_off, cmd_maintenance_on, \
     cmd_full_health
-from app.bot.keyboard.admin_kb import get_main_admin_kb, get_orders_admin_kb, get_workers_admin_kb, get_bot_admin_kb
+from app.bot.menu_admin.kb_admin import get_main_admin_kb, get_orders_admin_kb, get_workers_admin_kb, get_bot_admin_kb
 from app.bot.states import AdminStates
 from app.db.engine import async_session
-from app.db.models import User, OrderStatus, Order, OrderItem, Payment, AccountItem, Product
+from app.db.models import User, Order, OrderItem, Payment, AccountItem
 from app.db.models.order import OrderStatusHistory
-from app.services import storage_service
 from app.services.order_delivery import OrderDeliveryService
-from app.services.payment import generate_address
-from app.services.redis_cart import redis_client
 from config import settings  # или откуда импортируется settings
-from sqlalchemy import text, select, delete, func
-from app.bot.keyboards import get_cancel_kb
-
-from app.services.maintenance import MaintenanceService
+from sqlalchemy import select, delete
 
 logger = logging.getLogger(__name__)
 router = Router(name="admin_router")

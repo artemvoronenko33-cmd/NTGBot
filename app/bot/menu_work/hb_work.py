@@ -1,4 +1,4 @@
-# app/bot/handlers_worker.py
+# app/bot/hb_work.py
 """
 Handler'ы для worker'а (загрузка аккаунтов).
 Используется callback-based навигация (inline-кнопки) + FSM только для ZIP.
@@ -38,7 +38,7 @@ from app.services.worker_logger import (
 from app.bot.states import WorkerUploadStates
 
 # Keyboards
-from app.bot.keyboard.worker_kb import (
+from app.bot.menu_work.kb_work import (
     get_worker_menu,
     worker_categories_kb,
     worker_products_kb,

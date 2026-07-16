@@ -9,7 +9,6 @@ if sys.platform == "win32":
 
 import logging
 import sys
-import warnings
 from contextlib import asynccontextmanager
 
 import uvicorn
@@ -17,13 +16,13 @@ from aiogram import Dispatcher
 from fastapi import FastAPI
 
 from app.bot.bot_instance import bot
-from app.bot.handlers import router
+from app.bot.menu_user.hd_user import router
 from app.web.app import create_app
 from config import settings
 
 from app.db.middleware import DBSessionMiddleware
-from app.bot.handlers_worker import router as worker_router
-from app.bot.handlers_admin import router as admin_router
+from app.bot.menu_work.hb_work import router as worker_router
+from app.bot.menu_admin.hd_admin import router as admin_router
 
 from app.services.order_queue import OrderQueueService
 

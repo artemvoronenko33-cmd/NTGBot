@@ -1,4 +1,4 @@
-# app/bot/keyboard/worker_kb.py
+# app/bot/menu_work/kb_work.py
 """
 Клавиатуры для работника (worker).
 Inline-кнопки для выбора категорий и продуктов.
@@ -18,14 +18,10 @@ def get_worker_menu() -> ReplyKeyboardMarkup:
     """
     builder = ReplyKeyboardBuilder()
     builder.button(text="📤 Загрузить аккаунты")
-    builder.button(text="📊 Мои загруженные аккаунты")
+    #builder.button(text="📊 Мои загруженные аккаунты")
     builder.button(text="🔙 Главное меню")
     builder.adjust(1)
     return builder.as_markup(resize_keyboard=True)
-
-
-
-
 
 # ==================== INLINE КЛАВИАТУРЫ ДЛЯ ВЫБОРА ====================
 

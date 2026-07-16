@@ -8,7 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from app.db.engine import async_session
-from app.db.models import User, OrderItem, Order, OrderStatus, AccountItem, Product
+from app.db.models import User, OrderItem, Order, OrderStatus, AccountItem, Product, Category
 from app.services import storage_service
 from app.services.maintenance import MaintenanceService
 from app.services.payment import generate_address
@@ -61,10 +61,12 @@ async def cmd_deficit(message: Message):
                 OrderItem.product_id,
                 func.sum(OrderItem.quantity - func.coalesce(OrderItem.delivered_quantity, 0)).label("needed"),
                 Product.name.label("product_name"),
-                Product.category  # для eager loading
-            ).join(Order).join(Product, OrderItem.product_id == Product.id).where(
-                Order.status.in_([OrderStatus.PAID.value, OrderStatus.PARTIAL.value])
-            ).group_by(OrderItem.product_id, Product.name, Product.category)
+                Category.name.label("category_name")
+            ).join(Order) \
+                .join(Product, OrderItem.product_id == Product.id) \
+                .join(Category, Product.category_id == Category.id, isouter=True) \
+                .where(Order.status.in_([OrderStatus.PAID.value, OrderStatus.PARTIAL.value])) \
+                .group_by(OrderItem.product_id, Product.name, Category.name)
 
             needed_result = await session.execute(needed_stmt)
 
@@ -74,7 +76,7 @@ async def cmd_deficit(message: Message):
                     continue
 
                 product_name = row.product_name or f"Product {row.product_id}"
-                category_name = row.category.name if row.category else "Без категории"
+                category_name = row.category_name or "Без категории"
 
                 text += f"📦 <b>{product_name}</b> ({category_name})\n"
                 text += f"Нужно: <b>{needed}</b>\n\n"

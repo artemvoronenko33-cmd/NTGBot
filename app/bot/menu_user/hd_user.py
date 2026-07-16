@@ -1,23 +1,22 @@
-# app/bot/handlers.py
+# app/bot/hd_user.py
 import asyncio
 import logging
-from io import BytesIO
 
-import qrcode
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery, BufferedInputFile
 from aiogram.filters import Command
 from aiogram.fsm.context import FSMContext
-from sqlalchemy import select, update, func
+from sqlalchemy import select, func
 
-from app.bot.keyboards import (
+from app.bot.menu_user.cmd_user import _make_qr
+from app.bot.menu_user.kb_user import (
     main_menu_kb, categories_kb, products_kb, product_detail_kb,
     cart_view_kb, checkout_confirm_kb, payment_link_kb,
     balance_kb, cancel_topup_kb, topup_currency_kb, TOPUP_CURRENCIES,
     cabinet_kb,
 )
 from app.bot.states import TopUpStates
-from app.db.models import User, Category, Product, Order, OrderItem, Payment, TopUp
+from app.db.models import User, Product, Order, OrderItem, Payment, TopUp
 from app.db.engine import async_session
 from app.services.redis_cart import add_to_cart, get_cart, clear_cart
 from app.services.payment import create_invoice, generate_address
@@ -26,10 +25,7 @@ from config import settings
 from app.bot.bot_instance import bot
 
 from app.services.balance import (
-    check_rate_limit,
-    record_transaction,
-    get_user_balance_history,
-    TransactionType
+    get_user_balance_history
 )
 
 from app.services.payment_logger import (
@@ -37,7 +33,6 @@ from app.services.payment_logger import (
     log_payment_success,
     log_payment_failed,
     log_topup_initiated,
-    log_topup_completed,
     log_refund,
     log_rate_limit_hit,
     log_large_payment_admin_notified,
@@ -46,19 +41,12 @@ from app.services.payment_logger import (
 from app.db.repositories import CategoryRepository
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.services.balance import check_rate_limit, record_transaction, TransactionType
+from app.bot.notifier import notify_payment_success, notify_admin_large_payment
 
 
 logger = logging.getLogger(__name__)
 router = Router()
-
-def _make_qr(data: str) -> bytes:
-    qr = qrcode.QRCode(version=1, box_size=10, border=4)
-    qr.add_data(data)
-    qr.make(fit=True)
-    img = qr.make_image(fill_color="black", back_color="white")
-    buf = BytesIO()
-    img.save(buf, format="PNG")
-    return buf.getvalue()
 
 # ==================== Личный кабинет ====================
 @router.message(F.text == "👤 Личный кабинет")
@@ -332,15 +320,6 @@ async def back_to_categories(callback: CallbackQuery):
     await callback.answer()
 
 # ==================== Оплата с баланса ====================
-# app/bot/handlers.py
-# app/bot/handlers.py
-
-from app.services.balance import check_rate_limit, record_transaction, TransactionType
-from app.bot.notifier import notify_payment_success, notify_admin_large_payment
-import logging
-
-logger = logging.getLogger(__name__)
-
 
 @router.callback_query(F.data == "pay_order_f_balance")
 async def pay_from_balance(callback: CallbackQuery):
@@ -486,8 +465,6 @@ async def pay_from_balance(callback: CallbackQuery):
     # Очищаем корзину только после успешной оплаты
     await clear_cart(user_id)
 
-
-
 # ==================== Оплата через WestWallet ====================
 @router.callback_query(F.data == "pay_order")
 async def pay_order(callback: CallbackQuery):
@@ -562,7 +539,7 @@ async def pay_order(callback: CallbackQuery):
     )
 
 # ==================== Возвраты ====================
-# app/bot/handlers.py — добавьте новый хендлер
+# app/bot/hd_user.py — добавьте новый хендлер
 
 @router.callback_query(F.data.startswith("refund_order_"))
 async def refund_order(callback: CallbackQuery):
@@ -645,14 +622,12 @@ async def cancel_checkout(callback: CallbackQuery):
     await callback.answer()
 
 # ==================== Просмотр истории баланса (для пользователя) ====================
-# app/bot/handlers.py
+# app/bot/hd_user.py
 
 @router.callback_query(F.data == "balance_history")
 async def show_balance_history(callback: CallbackQuery):
     async with async_session() as session:
-        txs = await get_user_balance_history(
-            session, callback.from_user.id, limit=10
-        )
+        txs = await get_user_balance_history(session, callback.from_user.id, limit=10)
 
     if not txs:
         await callback.message.answer("📭 История транзакций пуста.")

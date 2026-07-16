@@ -1,4 +1,4 @@
-# app/bot/keyboard.py
+# app/bot/menu_work.py
 from aiogram.types import (
     ReplyKeyboardMarkup,
     KeyboardButton,
@@ -22,10 +22,10 @@ main_menu_kb = ReplyKeyboardMarkup(
             KeyboardButton(text="👤 Личный кабинет"),
             KeyboardButton(text="💳 Баланс")
         ],
-        [
-            KeyboardButton(text=" Поиск по биржам"),
-            KeyboardButton(text="🎟 Реферальная программа")
-        ]
+#        [
+#            KeyboardButton(text=" Поиск по биржам"),
+#            KeyboardButton(text="🎟 Реферальная программа")
+#        ]
     ],
     resize_keyboard=True,
     input_field_placeholder="Выберите раздел меню..."
