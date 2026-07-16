@@ -4,13 +4,17 @@ import logging
 from datetime import datetime
 
 import httpx
-from aiogram import Router
+from aiogram import Router, F
 from aiogram.fsm.context import FSMContext
-from aiogram.types import Message
+from aiogram.types import Message, CallbackQuery, ReplyKeyboardRemove
 from aiogram.filters import Command, StateFilter
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.bot.cmd_admin import cmd_workers, cmd_queue_status, cmd_deficit, cmd_maintenance_off, cmd_maintenance_on, \
+    cmd_full_health
+from app.bot.keyboard.admin_kb import get_main_admin_kb, get_orders_admin_kb, get_workers_admin_kb, get_bot_admin_kb
+from app.bot.states import AdminStates
 from app.db.engine import async_session
 from app.db.models import User, OrderStatus, Order, OrderItem, Payment, AccountItem, Product
 from app.db.models.order import OrderStatusHistory
@@ -20,7 +24,7 @@ from app.services.payment import generate_address
 from app.services.redis_cart import redis_client
 from config import settings  # или откуда импортируется settings
 from sqlalchemy import text, select, delete, func
-from app.bot.keyboards import get_admin_menu, get_cancel_kb
+from app.bot.keyboards import get_cancel_kb
 
 from app.services.maintenance import MaintenanceService
 
@@ -28,210 +32,154 @@ logger = logging.getLogger(__name__)
 router = Router(name="admin_router")
 
 @router.message(Command("admin"))
-async def cmd_worker(message: Message, session: AsyncSession):
-    user = await session.get(User, message.from_user.id)
-    if not user or not getattr(user, 'is_worker', False):
-        await message.answer("⛔ У вас нет доступа к панели работника.")
-        return
-
-    await message.answer(
-        "👷 Добро пожаловать в панель работника!\n\n"
-        "Выберите действие:",
-        reply_markup=get_admin_menu()
-    )
-
-@router.message(Command("addworker"))
-async def cmd_addworker(message: Message, session: AsyncSession):
-    """Назначить пользователя работником"""
+async def cmd_admin(message: Message):
     if message.from_user.id not in settings.ADMIN_IDS:
-        await message.answer("⛔ У вас нет прав администратора.")
+        await message.answer("⛔ Нет доступа.")
+        return
+    await message.answer(
+        "🛠️ <b>Админ-панель</b>\nВыберите раздел:",
+        reply_markup=get_main_admin_kb(),
+        parse_mode="HTML"
+    )
+# ==================== ГЛАВНОЕ МЕНЮ ====================
+@router.message(F.text == "📦 Заказы")
+async def admin_orders_section(message: Message):
+    if message.from_user.id not in settings.ADMIN_IDS: return
+    await message.answer("📦 Раздел Заказы:", reply_markup=get_orders_admin_kb())
+
+@router.message(F.text == "👷 Работники")
+async def admin_workers_section(message: Message):
+    if message.from_user.id not in settings.ADMIN_IDS: return
+    await message.answer("👷 Раздел Работники:", reply_markup=get_workers_admin_kb())
+
+@router.message(F.text == "🤖 Бот")
+async def admin_bot_section(message: Message):
+    if message.from_user.id not in settings.ADMIN_IDS: return
+    await message.answer("🤖 Раздел Бот:", reply_markup=get_bot_admin_kb())
+
+@router.message(F.text == "🔙 Выйти из админки")
+async def admin_exit(message: Message):
+    if message.from_user.id not in settings.ADMIN_IDS: return
+    await message.answer("👋 Вы вышли из админ-панели.", reply_markup=ReplyKeyboardRemove())
+
+
+# ==================== ПОДМЕНЮ ЗАКАЗЫ ====================
+@router.message(F.text == "📋 Статус очереди")
+async def admin_status(message: Message):
+    if message.from_user.id not in settings.ADMIN_IDS: return
+    await cmd_queue_status(message)
+
+@router.message(F.text == "🔄 Синхронизация аккаунтов")
+async def admin_sync(message: Message):
+    if message.from_user.id not in settings.ADMIN_IDS: return
+    await cmd_sync_accounts(message)
+
+@router.message(F.text == "📉 Дефицит аккаунтов")
+async def admin_deficit(message: Message):
+    if message.from_user.id not in settings.ADMIN_IDS: return
+    await cmd_deficit(message)
+
+#@router.message(F.text == "📊 Зарезервированные")
+#async def admin_reserved(message: Message):
+#    if message.from_user.id not in settings.ADMIN_IDS: return
+#    await message.answer("📊 Зарезервированные аккаунты (в разработке)")
+
+
+# ==================== ПОДМЕНЮ РАБОТНИКИ ====================
+@router.message(F.text == "👥 Список работников")
+async def admin_workers_list(message: Message, session: AsyncSession):
+    if message.from_user.id not in settings.ADMIN_IDS: return
+    await cmd_workers(message, session)   # ← передаём session
+
+
+@router.message(F.text == "➕ Добавить работника")
+async def admin_addworker_btn(message: Message, state: FSMContext):
+    if message.from_user.id not in settings.ADMIN_IDS:
+        return
+    await message.answer("Введите ID пользователя, которого хотите назначить работником:")
+    await state.set_state(AdminStates.waiting_for_add_worker_id)
+@router.message(AdminStates.waiting_for_add_worker_id)
+async def process_add_worker_id(message: Message, state: FSMContext, session: AsyncSession):
+    try:
+        target_id = int(message.text.strip())
+    except ValueError:
+        await message.answer("❌ ID должен быть числом. Попробуйте снова.")
         return
 
     try:
-        parts = message.text.strip().split(maxsplit=1)
-        if len(parts) < 2:
-            await message.answer(
-                "❌ Использование:\n"
-                "`/addworker <user_id>`\n\n"
-                "Пример: `/addworker 726313576`",
-                parse_mode="Markdown"
-            )
-            return
-
-        target_id = int(parts[1])
-
         user = await session.get(User, target_id)
-
         if not user:
-            user = User(
-                id=target_id,
-                is_worker=True
-            )
+            user = User(id=target_id, is_worker=True)
             session.add(user)
             action = "создан и назначен"
         else:
             if user.is_worker:
-                await message.answer(f"✅ Пользователь `{target_id}` уже является работником.")
+                await message.answer(f"✅ Пользователь `{target_id}` уже работник.")
+                await state.clear()
                 return
             user.is_worker = True
             action = "назначен"
 
         await session.commit()
-
-        await message.answer(
-            f"✅ Пользователь `{target_id}` успешно **{action}** работником.\n"
-            f"Теперь он может использовать команду /worker",
-            parse_mode="Markdown"
-        )
-
-    except ValueError:
-        await message.answer("❌ User ID должен быть числом.")
+        await message.answer(f"✅ Пользователь `{target_id}` успешно **{action}** работником.")
     except Exception as e:
         await session.rollback()
-        await message.answer(f"❌ Произошла ошибка: {str(e)}")
+        await message.answer(f"❌ Ошибка: {str(e)}")
+    finally:
+        await state.clear()
 
 
-@router.message(Command("delworker"))
-async def cmd_delworker(message: Message, session: AsyncSession):
-    """Снять статус работника"""
+@router.message(F.text == "➖ Удалить работника")
+async def admin_delworker_btn(message: Message, state: FSMContext):
     if message.from_user.id not in settings.ADMIN_IDS:
+        return
+    await message.answer("Введите ID пользователя, у которого хотите снять статус работника:")
+    await state.set_state(AdminStates.waiting_for_del_worker_id)
+@router.message(AdminStates.waiting_for_del_worker_id)
+async def process_del_worker_id(message: Message, state: FSMContext, session: AsyncSession):
+    try:
+        target_id = int(message.text.strip())
+    except ValueError:
+        await message.answer("❌ ID должен быть числом.")
         return
 
     try:
-        target_id = int(message.text.split()[1])
         user = await session.get(User, target_id)
-
         if user and user.is_worker:
             user.is_worker = False
             await session.commit()
             await message.answer(f"✅ У пользователя `{target_id}` снят статус работника.")
         else:
             await message.answer("❌ Пользователь не найден или не является работником.")
-    except Exception:
-        await message.answer("❌ Использование: `/delworker <user_id>`")
-
-
-@router.message(Command("workers"))
-async def cmd_workers(message: Message, session: AsyncSession):
-    """Список всех работников"""
-    if message.from_user.id not in settings.ADMIN_IDS:
-        return
-
-    from sqlalchemy import text
-
-    result = await session.execute(
-        text("SELECT id, username, balance FROM users WHERE is_worker = true ORDER BY id")
-    )
-    workers = result.fetchall()
-
-    if not workers:
-        await message.answer("👷 Пока нет работников.")
-        return
-
-    lines = ["👷 **Список работников:**\n"]
-    for w in workers:
-        username = w.username or "—"
-        balance = w.balance or 0
-        # Используем безопасный формат без MarkdownV2 проблем
-        lines.append(f"• {w.id} | {username} | Баланс: {balance}₽")
-
-    text_msg = "\n".join(lines)
-
-    await message.answer(text_msg, parse_mode=None)
-
-@router.message(Command("deficit"))
-async def cmd_deficit(message: Message):
-    """Показывает дефицит аккаунтов по продуктам"""
-    if message.from_user.id not in settings.ADMIN_IDS:
-        await message.answer("⛔ Нет доступа.")
-        return
-
-    try:
-        text = "📉 <b>Дефицит аккаунтов:</b>\n\n"
-
-        async with async_session() as session:
-            # Нужное количество по продуктам в очереди
-            needed_stmt = select(
-                OrderItem.product_id,
-                func.sum(OrderItem.quantity - func.coalesce(OrderItem.delivered_quantity, 0)).label("needed")
-            ).join(Order).where(
-                Order.status.in_([OrderStatus.PAID.value, OrderStatus.PARTIAL.value])
-            ).group_by(OrderItem.product_id)
-
-            needed_result = await session.execute(needed_stmt)
-
-            for row in needed_result:
-                product_id = row.product_id
-                needed = row.needed or 0
-
-                # Свободные аккаунты
-                free_stmt = select(func.count()).select_from(AccountItem).where(
-                    AccountItem.product_id == product_id,
-                    AccountItem.status == "free"
-                )
-                free_count = (await session.execute(free_stmt)).scalar() or 0
-
-                # Название продукта
-                prod = await session.get(Product, product_id)
-                name = prod.name if prod else f"Product {product_id}"
-
-                text += f"📦 <b>{name}</b>\nНужно: <b>{needed}</b> | В наличии: <b>{free_count}</b>\n\n"
-
-            if not text.endswith("Дефицит аккаунтов:</b>\n\n"):
-                text += "Дефицита нет."
-
-        await message.answer(text, parse_mode="HTML")
-
     except Exception as e:
-        logger.exception("Ошибка в /deficit")
-        await message.answer("❌ Ошибка при расчёте дефицита.")
+        await session.rollback()
+        await message.answer(f"❌ Ошибка: {str(e)}")
+    finally:
+        await state.clear()
 
-@router.message(Command("queue_status"))
-async def cmd_queue_status(message: Message):
-    """Показывает актуальное состояние очереди заказов"""
-    if message.from_user.id not in settings.ADMIN_IDS:
-        await message.answer("⛔ Нет доступа.")
-        return
 
-    try:
-        text = "📋 <b>Очередь заказов:</b>\n\n"
+# ==================== ПОДМЕНЮ БОТ ====================
+@router.message(F.text == "🩺 Health Check")
+async def admin_health(message: Message):
+    if message.from_user.id not in settings.ADMIN_IDS: return
+    await cmd_full_health(message)
 
-        async with async_session() as session:
-            stmt = select(Order).options(
-                selectinload(Order.items)
-            ).where(
-                Order.status.in_([OrderStatus.PAID.value, OrderStatus.PARTIAL.value])
-            ).order_by(Order.created_at.asc()).limit(30)
+@router.message(F.text == "🛠️ Включить сервис")
+async def admin_maintenance_on(message: Message):
+    if message.from_user.id not in settings.ADMIN_IDS: return
+    await cmd_maintenance_on(message)
 
-            result = await session.execute(stmt)
-            orders = result.scalars().all()
+@router.message(F.text == "✅ Выключить сервис")
+async def admin_maintenance_off(message: Message):
+    if message.from_user.id not in settings.ADMIN_IDS: return
+    await cmd_maintenance_off(message)
 
-            if not orders:
-                text += "Очередь пуста."
-            else:
-                for order in orders:
-                    total_needed = sum(item.quantity for item in order.items)
-                    total_delivered = sum(getattr(item, 'delivered_quantity', 0) or 0 for item in order.items)
-                    progress = int((total_delivered / total_needed * 100)) if total_needed > 0 else 0
 
-                    items_text = ""
-                    for item in order.items:
-                        name = getattr(item, 'product_name', f"ID{item.product_id}")
-                        delivered = getattr(item, 'delivered_quantity', 0) or 0
-                        items_text += f"• {name}: <b>{delivered}/{item.quantity}</b>\n"
-
-                    text += (
-                        f"Заказ <b>#{order.id}</b> | {order.status.upper()}\n"
-                        f"👤 {order.user_id}\n"
-                        f"Прогресс: <b>{progress}%</b>\n"
-                        f"{items_text}\n"
-                    )
-
-        await message.answer(text, parse_mode="HTML")
-
-    except Exception as e:
-        logger.exception("Ошибка в /queue_status")
-        await message.answer("❌ Ошибка при получении статуса очереди.")
+# ==================== НАЗАД ====================
+@router.message(F.text == "🔙 Назад")
+async def admin_back(message: Message):
+    if message.from_user.id not in settings.ADMIN_IDS: return
+    await message.answer("🛠️ Админ-панель:", reply_markup=get_main_admin_kb())
 
 
 @router.message(Command("delete_orders"))
@@ -239,8 +187,6 @@ async def delete_orders(message: Message, session: AsyncSession, state: FSMConte
     """Начать процесс удаления заказов"""
     await message.answer("Отправь ID заказов через запятую (например: 24,25,30)")
     await state.set_state("waiting_for_order_ids_to_delete")
-
-
 @router.message(StateFilter("waiting_for_order_ids_to_delete"))
 async def process_order_ids(message: Message, session: AsyncSession, state: FSMContext):
     try:
@@ -271,110 +217,7 @@ async def process_order_ids(message: Message, session: AsyncSession, state: FSMC
         await state.clear()
 
 
-@router.message(Command("maintenance_on"))
-async def cmd_maintenance_on(message: Message):
-    if message.from_user.id not in settings.ADMIN_IDS:
-        await message.answer("Нет доступа.")
-        return
-
-    await MaintenanceService.enable_maintenance(
-        message="Ведутся технические работы. Сервер перезагружается.",
-        updated_by=message.from_user.id
-    )
-    await message.answer("✅ Сервисный режим ВКЛЮЧЁН")
-
-
-@router.message(Command("maintenance_off"))
-async def cmd_maintenance_off(message: Message):
-    if message.from_user.id not in settings.ADMIN_IDS:
-        await message.answer("Нет доступа.")
-        return
-
-    await MaintenanceService.disable_maintenance()
-    await message.answer("✅ Сервисный режим ВЫКЛЮЧЕН")
-
-
-@router.message(Command("health"))
-async def cmd_full_health(message: Message):
-    if message.from_user.id not in settings.ADMIN_IDS:
-        await message.answer("Нет доступа.")
-        return
-
-    await message.answer("🔍 Полная диагностика системы...")
-
-    status = {
-        "bot": "✅ Работает",
-        "database": "❌",
-        "redis": "❌",
-        "westwallet": "❌",
-        "storage": "❌",
-        "webapi": "❌",
-    }
-
-    details = []
-
-    # 1. База данных
-    try:
-        async with async_session() as session:
-            await session.execute(text("SELECT 1"))
-            users = (await session.execute(select(func.count(User.id)))).scalar()
-        status["database"] = "✅ OK"
-        details.append(f"• БД: {users} пользователей")
-    except Exception as e:
-        status["database"] = f"❌ {str(e)[:80]}"
-
-    # 2. Redis
-    try:
-        await redis_client.ping()
-        status["redis"] = "✅ OK"
-        details.append("• Redis: подключён")
-    except Exception:
-        status["redis"] = "❌ Нет связи"
-
-    # 3. WestWallet
-    try:
-        await generate_address("health_test", currency="USDTTRC")
-        status["westwallet"] = "✅ OK"
-    except Exception:
-        status["westwallet"] = "⚠️ Проблемы с API"
-
-    # 4. Storage
-    try:
-        if hasattr(storage_service, 's3_client'):
-            storage_service.s3_client.list_objects_v2(Bucket=storage_service.bucket, MaxKeys=1)
-            status["storage"] = "✅ OK"
-    except Exception:
-        status["storage"] = "⚠️ Проблемы с S3"
-
-    # 5. Web API (более надёжная проверка)
-    try:
-        async with httpx.AsyncClient(timeout=3.0) as client:
-            resp = await client.get(f"http://127.0.0.1:{settings.WEB_API_PORT}/health", follow_redirects=True)
-            if resp.status_code == 200:
-                status["webapi"] = "✅ OK"
-                details.append("• WebAPI: отвечает")
-            else:
-                status["webapi"] = f"⚠️ HTTP {resp.status_code}"
-    except httpx.ConnectError:
-        status["webapi"] = "❌ Процесс не запущен (порт 8001)"
-    except Exception as e:
-        status["webapi"] = f"❌ Ошибка соединения: {str(e)[:60]}"
-    except Exception:
-        status["webapi"] = "❌ Не отвечает (порт 8001)"
-
-    # Итоговый отчёт
-    report = "📊 **Состояние системы**\n\n"
-    for k, v in status.items():
-        report += f"{v} **{k.upper()}**\n"
-
-    if details:
-        report += "\n" + "\n".join(details)
-
-    report += f"\n\n🕒 {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}"
-
-    await message.answer(report, parse_mode="Markdown")
-
-@router.message(Command("sync_accounts"))
+@router.callback_query(F.data =="sync_accounts")
 async def cmd_sync_accounts(message: Message):
     """Синхронизация БД ↔ S3 + группировка зарезервированных аккаунтов по заказу"""
     if message.from_user.id not in settings.ADMIN_IDS:
@@ -435,3 +278,4 @@ async def cmd_sync_accounts(message: Message):
     except Exception as e:
         logger.exception("Ошибка в /sync_accounts")
         await message.answer("❌ Произошла ошибка при сверке.")
+

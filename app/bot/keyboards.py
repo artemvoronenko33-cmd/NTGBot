@@ -122,17 +122,6 @@ def admin_order_kb(order_id: int, is_paid: bool) -> InlineKeyboardMarkup:
         )
     return builder.as_markup()
 
-
-
-def get_admin_menu() -> ReplyKeyboardMarkup:
-    builder = ReplyKeyboardBuilder()
-    builder.button(text="📤 Загрузить аккаунты")
-    builder.button(text="📊 Мои загруженные аккаунты")
-    builder.button(text="🔙 Вернуться в главное меню")
-    builder.adjust(1)
-    return builder.as_markup(resize_keyboard=True)
-
-
 def get_cancel_kb() -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[[KeyboardButton(text="❌ Отмена")]],

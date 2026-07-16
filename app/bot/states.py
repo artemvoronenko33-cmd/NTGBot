@@ -13,3 +13,7 @@ class WorkerUploadStates(StatesGroup):
     FSM нужна только для ожидания ZIP-архива.
     """
     waiting_for_zip = State()
+
+class AdminStates(StatesGroup):
+    waiting_for_add_worker_id = State()
+    waiting_for_del_worker_id = State()
