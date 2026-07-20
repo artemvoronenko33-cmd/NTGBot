@@ -269,9 +269,14 @@ class ProductAdmin(ModelView, model=Product):
     column_searchable_list = [Product.name]
     column_filters = []
     column_editable_list = [Product.price, Product.is_active]
+    
+    # ✅ Включаем импорт и экспорт CSV
     can_create = True
     can_delete = True
     can_edit = True
+    can_export = True
+    can_import = True   # SQLAdmin поддерживает импорт CSV из коробки
+    
     name = "Товар"
     name_plural = "📦 Товары"
     icon = "fa-solid fa-box"
