@@ -11,6 +11,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import selectinload
 
 from app.db.models import Order, OrderItem, AccountItem, OrderStatus, Product
+from app.services.redis_cart import redis_client
 from app.services.storage import StorageService
 
 logger = logging.getLogger(__name__)
@@ -86,6 +87,59 @@ class OrderDeliveryService:
             logger.error(f"Move to lost_empty failed {s3_prefix}: {e}")
             return False
 
+    async def _delete_prefix_completely(self, s3_prefix: str) -> bool:
+        """
+        Полностью удаляет все объекты по префиксу в S3 (с учетом пагинации)
+        и пытается удалить возможный маркер-папку (ключ, оканчивающийся на '/').
+        """
+        try:
+            prefix = s3_prefix.rstrip('/') + '/'
+            continuation_token = None
+
+            while True:
+                kwargs = {
+                    'Bucket': self.storage.bucket,
+                    'Prefix': prefix,
+                    'MaxKeys': 1000
+                }
+                if continuation_token:
+                    kwargs['ContinuationToken'] = continuation_token
+
+                response = self.storage.s3_client.list_objects_v2(**kwargs)
+                contents = response.get('Contents', [])
+
+                if not contents:
+                    break
+
+                # Удаляем найденные объекты батчами (delete_objects поддерживает до 1000)
+                objects_to_delete = [{'Key': obj['Key']} for obj in contents]
+                try:
+                    self.storage.s3_client.delete_objects(
+                        Bucket=self.storage.bucket,
+                        Delete={'Objects': objects_to_delete}
+                    )
+                except Exception as ex:
+                    logger.warning(f"Failed to delete some objects for prefix {prefix}: {ex}")
+
+                if not response.get('IsTruncated', False):
+                    break
+
+                continuation_token = response.get('NextContinuationToken')
+
+            # Попытка удалить маркер-папку (например 'prefix/')
+            try:
+                folder_key = prefix
+                self.storage.s3_client.delete_object(Bucket=self.storage.bucket, Key=folder_key)
+            except Exception:
+                # Не критично, просто логируем на debug
+                logger.debug(f"No explicit folder object to delete for {prefix}")
+
+            logger.info(f"Deleted all objects under prefix {prefix}")
+            return True
+        except Exception as e:
+            logger.warning(f"Error deleting prefix {s3_prefix}: {e}")
+            return False
+
     async def reserve_accounts_for_order(self, session: AsyncSession, order_id: int) -> bool:
         order = await session.get(Order, order_id)
         if not order:
@@ -145,24 +199,29 @@ class OrderDeliveryService:
             if reserved_count < needed:
                 success = False
 
-        total_needed = sum(i.quantity for i in order.items)
-        total_delivered = sum((i.delivered_quantity or 0) for i in order.items)
-        delivery_info["overall"] = int((total_delivered / total_needed) * 100) if total_needed > 0 else 100
-        order.delivery_info = delivery_info
-
-        if success and total_delivered >= total_needed:
-            order.status = OrderStatus.PROCESSING.value
-        else:
-            order.status = OrderStatus.PARTIAL.value
-
         # Пересчёт общего прогресса
         total_needed = sum(i.quantity for i in order.items)
         total_delivered = sum((i.delivered_quantity or 0) for i in order.items)
         delivery_info["overall"] = int((total_delivered / total_needed) * 100) if total_needed > 0 else 100
-
         order.delivery_info = delivery_info
 
-        await session.commit()  # <--- добавить
+        # Устанавливаем статус и при необходимости ставим заказ в Redis-очередь
+        if success and total_delivered >= total_needed:
+            order.status = OrderStatus.PROCESSING.value
+            # Сначала сохраняем изменения статуса в БД
+            await session.commit()
+            # Попытка поместить заказ в Redis-очередь для обработки архива
+            queue_key = "order:processing:queue"
+            try:
+                await redis_client.rpush(queue_key, str(order.id))
+                logger.info(f"Order {order.id} enqueued to Redis queue {queue_key}")
+            except Exception as ex:
+                # Не фатально — логируем и продолжаем. Заказ уже в состоянии PROCESSING в БД.
+                logger.warning(f"Failed to enqueue order {order.id} to Redis: {ex}")
+        else:
+            order.status = OrderStatus.PARTIAL.value
+            await session.commit()
+
         return success
 
 
@@ -193,9 +252,9 @@ class OrderDeliveryService:
                     total_files = 0
 
                     for item in order.items:
+                        # 1) Получаем категорию (как раньше)
                         category_name = "Без_категории"
                         try:
-                            # Теперь категория должна быть загружена
                             if item.product and item.product.category:
                                 category_name = item.product.category.name
                             elif item.product and item.product.name:
@@ -205,21 +264,42 @@ class OrderDeliveryService:
                         except Exception as e:
                             logger.warning(f"Проблема с категорией для item {item.id}: {e}")
 
+                        # 2) Получаем имя продукта (для второго уровня)
+                        product_name_raw = "product"
+                        try:
+                            if item.product and getattr(item.product, "name", None):
+                                product_name_raw = item.product.name
+                            elif getattr(item, "product_name", None):
+                                product_name_raw = item.product_name
+                        except Exception:
+                            product_name_raw = "product"
+
+                        # 3) Создаём безопасные имена для папок
                         safe_category = "".join(
                             c if c.isalnum() or c in " _-()" else "_"
                             for c in category_name
                         ).strip() or "uncategorized"
 
+                        safe_product = "".join(
+                            c if c.isalnum() or c in " _-()" else "_"
+                            for c in product_name_raw
+                        ).strip() or "product"
+
+                        # 4) Обрабатываем каждый зарезервированный префикс (аккаунт)
                         for s3_prefix in (getattr(item, 'reserved_accounts', []) or []):
-                            logger.info(f"Order {order_id} → Категория '{category_name}' → {s3_prefix}")
+                            logger.info(
+                                f"Order {order_id} → Category '{category_name}' | Product '{product_name_raw}' → {s3_prefix}")
 
                             local_files = await self._download_account_from_s3(s3_prefix)
                             if not local_files:
-                                logger.error(f"Аккаунт пуст: {s3_prefix}")
+                                logger.error(f"Аккаунт пуст или не удалось скачать: {s3_prefix}")
                                 continue
 
+                            # local_files keys уже содержат account_folder_name/...
                             for rel_path, data in local_files.items():
-                                full_rel_path = f"{safe_category}/{rel_path}"
+                                # теперь структура в ZIP: category/product/account_folder/.../file
+                                full_rel_path = f"{safe_category}/{safe_product}/{rel_path}"
+                                logger.debug(f"Adding to zip: {full_rel_path} (from {s3_prefix})")
                                 zipf.writestr(full_rel_path, data)
                                 total_files += 1
 
@@ -242,21 +322,42 @@ class OrderDeliveryService:
             await session.rollback()
             return None, ""
 
-        # Очистка S3
+        # Очистка S3 и обновление записей AccountItem в БД
         try:
             for item in order.items:
-                for s3_prefix in (getattr(item, 'reserved_accounts', []) or []):
-                    prefix = s3_prefix.rstrip('/') + '/'
-                    response = self.storage.s3_client.list_objects_v2(
-                        Bucket=self.storage.bucket, Prefix=prefix
-                    )
-                    if 'Contents' in response:
-                        objects = [{'Key': obj['Key']} for obj in response['Contents']]
-                        self.storage.s3_client.delete_objects(
-                            Bucket=self.storage.bucket, Delete={'Objects': objects}
-                        )
+                prefixes = list(getattr(item, 'reserved_accounts', []) or [])
+                for s3_prefix in prefixes:
+                    # Удаляем объекты по префиксу (с пагинацией)
+                    deleted = await self._delete_prefix_completely(s3_prefix)
+                    if not deleted:
+                        logger.warning(f"Не удалось полностью удалить префикс {s3_prefix} для заказа {order_id}")
+
+                    # Обновляем запись AccountItem — помечаем как delivered и снимаем резерв
+                    try:
+                        stmt = select(AccountItem).where(AccountItem.s3_prefix == s3_prefix)
+                        res = await session.execute(stmt)
+                        acc = res.scalar_one_or_none()
+                        if acc:
+                            acc.status = "delivered"
+                            acc.is_reserved = False
+                            acc.reserved_for_order_id = None
+                            acc.reserved_at = None
+                            # Не удаляем запись, чтобы сохранить метаданные; при желании можно вместо этого удалить
+                            await session.flush()
+                    except Exception as ex:
+                        logger.warning(f"DB update failed for AccountItem {s3_prefix}: {ex}")
+
+                # Очистим список зарезервированных префиксов и установим delivered_quantity
+                item.reserved_accounts = []
+                item.delivered_quantity = item.quantity
+            # Сохраняем все изменения в БД
+            await session.commit()
         except Exception as e:
-            logger.warning(f"Ошибка очистки S3 для заказа {order_id}: {e}")
+            logger.warning(f"Ошибка очистки S3 / обновления DB для заказа {order_id}: {e}")
+            try:
+                await session.rollback()
+            except Exception:
+                pass
 
         return archive_bytes, password
 

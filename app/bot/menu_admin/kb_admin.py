@@ -9,7 +9,7 @@ def get_main_admin_kb() -> ReplyKeyboardMarkup:
             KeyboardButton(text="👷 Работники")
         ],
         [KeyboardButton(text="🤖 Бот")],
-        [KeyboardButton(text="🔙 Выйти из админки")],
+        #[KeyboardButton(text="🔙 Выйти из админки")],
     ]
     return ReplyKeyboardMarkup(keyboard=kb, resize_keyboard=True)
 

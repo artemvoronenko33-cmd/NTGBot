@@ -218,7 +218,7 @@ async def search_in_category(callback: CallbackQuery, state: FSMContext):
 async def show_all_products(callback: CallbackQuery, session: AsyncSession):
     cat_id = int(callback.data.split("_")[2])
     # Здесь можно использовать существующий products_kb со всеми товарами
-    products = await CategoryRepository.get_active_products_by_category(session, cat_id)
+    products = await CategoryRepository.get_active_products_by_category_with_counts(session, cat_id)
     await callback.message.edit_text(
         f"📋 Все товары категории",
         reply_markup=products_kb(products)  # ваша старая функция

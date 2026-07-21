@@ -58,8 +58,9 @@ def products_kb(products_with_counts):
         if free_count > 0:
             text += f" ({free_count} свободно)"
         builder.button(text=text, callback_data=f"prod_{prod.id}")
-    builder.adjust(1)
     builder.button(text="🔙 Назад к категориям", callback_data="back_to_cats")
+    builder.adjust(1)
+
     return builder.as_markup()
 
 def product_detail_kb(product_id, category_id):
@@ -148,7 +149,7 @@ def products_top_kb(products_with_counts, category_id):
     # Дополнительные кнопки — в отдельной строке
     builder.button(text="🔍 Поиск", callback_data=f"search_in_cat_{category_id}")
     builder.adjust(1)  # каждый элемент в своей строке
-    builder.button(text="📋 Весь список", callback_data=f"all_products_{category_id}")
+    #builder.button(text="📋 Весь список", callback_data=f"all_products_{category_id}")
     builder.button(text="🔙 Назад к категориям", callback_data="back_to_cats")
 
 
