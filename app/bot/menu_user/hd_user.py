@@ -13,9 +13,9 @@ from app.bot.menu_user.kb_user import (
     main_menu_kb, categories_kb, products_kb, product_detail_kb,
     cart_view_kb, checkout_confirm_kb, payment_link_kb,
     balance_kb, cancel_topup_kb, topup_currency_kb, TOPUP_CURRENCIES,
-    cabinet_kb,
+    cabinet_kb, products_top_kb,
 )
-from app.bot.states import TopUpStates
+from app.bot.states import TopUpStates, ProductSearchStates
 from app.db.models import User, Product, Order, OrderItem, Payment, TopUp
 from app.db.engine import async_session
 from app.services.redis_cart import add_to_cart, get_cart, clear_cart
@@ -165,20 +165,18 @@ async def show_categories(message: Message, session: AsyncSession):
 # ==================== Выбор категории (callback) ====================
 @router.callback_query(F.data.startswith("cat_"))
 async def process_category(callback: CallbackQuery, session: AsyncSession):
-    """Обработка выбора категории и показ товаров"""
     logger.debug(f"Processing category selection. Data: {callback.data}")
 
     try:
         cat_id = int(callback.data.split("_")[1])
-    except (IndexError, ValueError) as e:
-        logger.warning(f"Failed to parse category ID: {e}")
+    except (IndexError, ValueError):
         await callback.answer("❌ Ошибка формата", show_alert=True)
         return
 
     try:
-        # Новый метод с counts
-        products_data = await CategoryRepository.get_active_products_by_category_with_counts(
-            session, cat_id
+        # Новый метод — топ-8 товаров
+        products_data = await CategoryRepository.get_top_products_by_category(
+            session, cat_id, limit=8
         )
 
         if not products_data:
@@ -186,16 +184,15 @@ async def process_category(callback: CallbackQuery, session: AsyncSession):
             await callback.answer()
             return
 
-        # Получаем информацию о категории
         category = await CategoryRepository.get_category_by_id(session, cat_id)
         if not category:
-            logger.warning(f"Category {cat_id} not found")
             await callback.answer("❌ Категория не найдена", show_alert=True)
             return
 
         await callback.message.answer(
-            f"📂 Товары: <b>{category.name}</b>",
-            reply_markup=products_kb(products_data),   # ← передаём products_data
+            f"📂 Товары: <b>{category.name}</b>\n\n"
+            f"🔝 Показаны топ-8 по наличию:",
+            reply_markup=products_top_kb(products_data, cat_id),
             parse_mode="HTML"
         )
 
@@ -206,6 +203,60 @@ async def process_category(callback: CallbackQuery, session: AsyncSession):
         logger.exception(f"Error processing category {cat_id}: {e}")
         await callback.answer("❌ Ошибка при загрузке товаров", show_alert=True)
 
+# Поиск в категории
+@router.callback_query(F.data.startswith("search_in_cat_"))
+async def search_in_category(callback: CallbackQuery, state: FSMContext):
+    cat_id = int(callback.data.split("_")[3])
+    await state.update_data(search_category_id=cat_id)
+    await state.set_state(ProductSearchStates.waiting_for_search_query)
+    await callback.message.answer("🔍 Введите текст для поиска в этой категории:")
+    await callback.answer()
+
+
+# Весь список
+@router.callback_query(F.data.startswith("all_products_"))
+async def show_all_products(callback: CallbackQuery, session: AsyncSession):
+    cat_id = int(callback.data.split("_")[2])
+    # Здесь можно использовать существующий products_kb со всеми товарами
+    products = await CategoryRepository.get_active_products_by_category(session, cat_id)
+    await callback.message.edit_text(
+        f"📋 Все товары категории",
+        reply_markup=products_kb(products)  # ваша старая функция
+    )
+    await callback.answer()
+
+@router.message(ProductSearchStates.waiting_for_search_query)
+async def process_product_search(message: Message, state: FSMContext, session: AsyncSession):
+    query = message.text.strip().lower()
+    data = await state.get_data()
+    cat_id = data.get("search_category_id")
+
+    if not cat_id:
+        await message.answer("❌ Сессия поиска устарела.")
+        await state.clear()
+        return
+
+    # Получаем все активные товары категории
+    products_data = await CategoryRepository.get_active_products_by_category_with_counts(session, cat_id)
+
+    # Фильтрация по названию (неполное совпадение)
+    filtered = []
+    for prod, free_count in products_data:
+        if query in prod.name.lower():
+            filtered.append((prod, free_count))
+
+    if not filtered:
+        await message.answer("🔍 Ничего не найдено по запросу.")
+        await state.clear()
+        return
+
+    await message.answer(
+        f"🔍 Результаты поиска по «{message.text}» ({len(filtered)} найдено):",
+        reply_markup=products_kb(filtered),   # используем вашу существующую функцию
+        parse_mode="HTML"
+    )
+
+    await state.clear()
 
 # ==================== Выбор товара (callback) ====================
 @router.callback_query(F.data.startswith("prod_"))

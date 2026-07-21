@@ -21,3 +21,6 @@ class AdminStates(StatesGroup):
 class AdminImportStates(StatesGroup):
     waiting_for_category = State()   # выбор категории
     waiting_for_text = State()        # ожидание TXT-файла
+
+class ProductSearchStates(StatesGroup):
+    waiting_for_search_query = State()

@@ -131,3 +131,25 @@ def get_cancel_kb() -> ReplyKeyboardMarkup:
         keyboard=[[KeyboardButton(text="❌ Отмена")]],
         resize_keyboard=True
     )
+
+
+def products_top_kb(products_with_counts, category_id):
+    """Топ-8 товаров + кнопки (исправленный layout)"""
+    builder = InlineKeyboardBuilder()
+
+    # Добавляем товары (по 1 в строку)
+    for prod, free_count in products_with_counts:
+        price_fmt = f"{prod.price / 100:.2f}"
+        text = f"{prod.name} | {price_fmt}{settings.CURRENCY_SYMBOL}"
+        if free_count > 0:
+            text += f" ({free_count})"
+        builder.button(text=text, callback_data=f"prod_{prod.id}")
+
+    # Дополнительные кнопки — в отдельной строке
+    builder.button(text="🔍 Поиск", callback_data=f"search_in_cat_{category_id}")
+    builder.adjust(1)  # каждый элемент в своей строке
+    builder.button(text="📋 Весь список", callback_data=f"all_products_{category_id}")
+    builder.button(text="🔙 Назад к категориям", callback_data="back_to_cats")
+
+
+    return builder.as_markup()

@@ -169,3 +169,26 @@ class CategoryRepository:
 
         result = await session.execute(stmt)
         return result.all()  # [(product, free_count), ...]
+
+    @staticmethod
+    async def get_top_products_by_category(
+            session: AsyncSession,
+            category_id: int,
+            limit: int = 8
+    ):
+        """Топ товаров по количеству свободных аккаунтов"""
+        stmt = select(
+            Product,
+            func.count(AccountItem.id).label("free_count")
+        ).outerjoin(
+            AccountItem,
+            (AccountItem.product_id == Product.id) & (AccountItem.status == "free")
+        ).where(
+            (Product.category_id == category_id) & (Product.is_active == True)
+        ).group_by(Product.id).order_by(
+            func.count(AccountItem.id).desc(),
+            Product.name
+        ).limit(limit)
+
+        result = await session.execute(stmt)
+        return result.all()  # [(product, free_count), ...]
