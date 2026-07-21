@@ -28,6 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqladmin import Admin
 from sqladmin.authentication import AuthenticationBackend
 
+from app.db.models import Product
 # Проектные модули
 from config import settings
 from app.db.engine import async_session

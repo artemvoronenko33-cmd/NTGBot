@@ -145,16 +145,16 @@ async def cmd_start(message: Message, state: FSMContext):
 async def show_categories(message: Message, session: AsyncSession):
     """Показываем все доступные категории"""
     try:
-        # Используем repository вместо raw SQL
-        categories = await CategoryRepository.get_all_active_categories(session)
+        # Новый метод с counts
+        categories_data = await CategoryRepository.get_all_active_categories_with_counts(session)
 
-        if not categories:
+        if not categories_data:
             await message.answer("📭 Категорий пока нет.")
             return
 
         await message.answer(
             "📂 Выберите категорию:",
-            reply_markup=categories_kb(categories)
+            reply_markup=categories_kb(categories_data)
         )
 
     except Exception as e:
@@ -176,10 +176,12 @@ async def process_category(callback: CallbackQuery, session: AsyncSession):
         return
 
     try:
-        # Используем repository для получения продуктов
-        products = await CategoryRepository.get_active_products_by_category(session, cat_id)
+        # Новый метод с counts
+        products_data = await CategoryRepository.get_active_products_by_category_with_counts(
+            session, cat_id
+        )
 
-        if not products:
+        if not products_data:
             await callback.message.answer("📦 В этой категории пока нет товаров.")
             await callback.answer()
             return
@@ -187,13 +189,13 @@ async def process_category(callback: CallbackQuery, session: AsyncSession):
         # Получаем информацию о категории
         category = await CategoryRepository.get_category_by_id(session, cat_id)
         if not category:
-            logger.warning(f"Category {cat_id} not found when processing products")
+            logger.warning(f"Category {cat_id} not found")
             await callback.answer("❌ Категория не найдена", show_alert=True)
             return
 
         await callback.message.answer(
             f"📂 Товары: <b>{category.name}</b>",
-            reply_markup=products_kb(products),
+            reply_markup=products_kb(products_data),   # ← передаём products_data
             parse_mode="HTML"
         )
 

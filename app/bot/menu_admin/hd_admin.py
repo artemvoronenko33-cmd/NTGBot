@@ -1,19 +1,21 @@
 # app/bot/hd_admin.py
 import logging
+import re
 
 from aiogram import Router, F
 from aiogram.fsm.context import FSMContext
-from aiogram.types import Message, ReplyKeyboardRemove
+from aiogram.types import Message, ReplyKeyboardRemove, CallbackQuery, ReplyKeyboardMarkup, KeyboardButton
 from aiogram.filters import Command, StateFilter
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.bot.menu_admin.cmd_admin import cmd_workers, cmd_queue_status, cmd_deficit, cmd_maintenance_off, cmd_maintenance_on, \
     cmd_full_health
-from app.bot.menu_admin.kb_admin import get_main_admin_kb, get_orders_admin_kb, get_workers_admin_kb, get_bot_admin_kb
-from app.bot.states import AdminStates
+from app.bot.menu_admin.kb_admin import get_main_admin_kb, get_orders_admin_kb, get_workers_admin_kb, get_bot_admin_kb, admin_import_categories_kb, admin_import_cancel_kb
+from app.bot.states import AdminStates, AdminImportStates
 from app.db.engine import async_session
-from app.db.models import User, Order, OrderItem, Payment, AccountItem
+from app.db.models import User, Order, OrderItem, Payment, AccountItem, Product, Category
 from app.db.models.order import OrderStatusHistory
+from app.db.repositories import CategoryRepository
 from app.services.order_delivery import OrderDeliveryService
 from config import settings  # или откуда импортируется settings
 from sqlalchemy import select, delete
@@ -269,3 +271,152 @@ async def cmd_sync_accounts(message: Message):
         logger.exception("Ошибка в /sync_accounts")
         await message.answer("❌ Произошла ошибка при сверке.")
 
+# ==================== ИМПОРТ ТОВАРОВ ИЗ ТЕКСТА (/impProd) ====================
+@router.message(Command("impProd"))
+async def cmd_imp_prod(message: Message, session: AsyncSession, state: FSMContext):
+    if message.from_user.id not in settings.ADMIN_IDS:
+        await message.answer("⛔ Доступ запрещён.")
+        return
+
+    await state.clear()
+
+    categories = await CategoryRepository.get_all_active_categories(session)
+    if not categories:
+        await message.answer("❌ Нет категорий.")
+        return
+
+    await state.set_state(AdminImportStates.waiting_for_category)
+    await message.answer(
+        "📂 Выберите категорию для импорта товаров:",
+        reply_markup=admin_import_categories_kb(categories)
+    )
+
+@router.message(AdminImportStates.waiting_for_category)
+async def choose_category(message: Message, session: AsyncSession, state: FSMContext):
+    category_name = message.text.strip()
+
+    category = await session.execute(select(Category).where(Category.name == category_name))
+    category = category.scalar_one_or_none()
+
+    if not category:
+        await message.answer("❌ Такой категории нет. Попробуйте ещё раз или /impProd.")
+        return
+
+    await state.update_data(category_id=category.id, category_name=category.name)
+    await state.set_state(AdminImportStates.waiting_for_text)
+
+    await message.answer(
+        f"✅ Категория выбрана: <b>{category.name}</b>\n\n"
+        f"Теперь отправьте **сообщение** со списком товаров в формате:\n"
+        f"<code>Acoins (50$)\n"
+        f"Advcash/Volet (40$)\n"
+        f"Другой товар (100$)</code>",
+        parse_mode="HTML",
+        reply_markup=admin_import_cancel_kb()
+    )
+
+
+@router.message(AdminImportStates.waiting_for_text)
+async def process_text_import(message: Message, state: FSMContext, session: AsyncSession):
+    data = await state.get_data()
+    category_id = data.get("category_id")
+    category_name = data.get("category_name")
+
+    if not category_id:
+        await message.answer("❌ Сессия устарела. /impProd")
+        await state.clear()
+        return
+
+    if message.text == "❌ В меню":
+        await state.clear()
+        await message.answer("❌ Импорт отменён.")
+        return
+
+    added_list = []      # новые товары
+    updated_list = []    # обновлённые цены
+    skipped_list = []    # пропущенные
+
+    try:
+        for raw_line in message.text.splitlines():
+            line = raw_line.strip()
+            if not line:
+                continue
+
+            clean_line = re.sub(r'\s+', ' ', line).strip()
+            match = re.search(r'(.+?)\s*\((\d+)\$\)', clean_line)
+
+            if not match:
+                skipped_list.append(line)
+                continue
+
+            name = match.group(1).strip()
+            try:
+                price_usd = int(match.group(2))
+            except ValueError:
+                skipped_list.append(line)
+                continue
+
+            price_cents = price_usd * 100
+
+            # Проверяем существование товара
+            existing = await session.execute(
+                select(Product).where(Product.name == name, Product.category_id == category_id)
+            )
+            product = existing.scalar_one_or_none()
+
+            if product:
+                if product.price != price_cents:
+                    # Обновляем цену
+                    old_price = product.price / 100
+                    product.price = price_cents
+                    updated_list.append(f"{name} ({old_price}$ → {price_usd}$)")
+                else:
+                    skipped_list.append(f"{name} (дубликат, цена та же)")
+                continue
+
+            # Новый товар
+            prod = Product(
+                name=name,
+                price=price_cents,
+                category_id=category_id,
+                is_active=True,
+                description="Импортировано из сообщения"
+            )
+            session.add(prod)
+            added_list.append(name)
+
+        await session.commit()
+
+        # Формируем отчёт
+        result_text = f"✅ <b>Импорт завершён!</b>\n\nКатегория: {category_name}\n\n"
+
+        if added_list:
+            result_text += f"<b>Добавлено новых товаров: {len(added_list)}</b>\n"
+            for name in added_list:
+                result_text += f"• {name}\n"
+            result_text += "\n"
+
+        if updated_list:
+            result_text += f"<b>Обновлено цен: {len(updated_list)}</b>\n"
+            for item in updated_list:
+                result_text += f"• {item}\n"
+            result_text += "\n"
+
+        if skipped_list:
+            result_text += f"⏭️ Пропущено: {len(skipped_list)}\n"
+            result_text += "Примеры:\n" + "\n".join(skipped_list[:5])
+
+        await message.answer(result_text, parse_mode="HTML")
+
+    except Exception as e:
+        await session.rollback()
+        logger.exception(e)
+        await message.answer(f"❌ Ошибка: {str(e)}")
+    finally:
+        await state.clear()
+
+
+@router.message(AdminImportStates.waiting_for_text, F.text == "❌ В меню")
+async def cancel_import(message: Message, state: FSMContext):
+    await state.clear()
+    await message.answer("❌ Импорт отменён.", reply_markup=get_main_admin_kb())

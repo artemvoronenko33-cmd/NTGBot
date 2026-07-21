@@ -282,7 +282,6 @@ class ProductAdmin(ModelView, model=Product):
     icon = "fa-solid fa-box"
     column_formatters = {Product.price: lambda obj, prop: format_currency(obj.price, symbol="$")}
 
-
 class CategoryAdmin(ModelView, model=Category):
     column_list = [Category.id, Category.name]
     column_labels = {Category.name: "Название"}
@@ -363,9 +362,6 @@ def get_status_color(status: str) -> str:
     return colors.get(status, "secondary")
 
 
-
-
-
 def format_history_list(history) -> str:
     """Форматирует историю статусов в простой текст"""
     if not history:
@@ -396,5 +392,3 @@ ADMIN_VIEWS = [
 ]
 
 
-def format_money():
-    return None

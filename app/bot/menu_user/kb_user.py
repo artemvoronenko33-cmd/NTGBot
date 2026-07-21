@@ -40,20 +40,24 @@ def cabinet_kb():
     builder.adjust(1)
     return builder.as_markup()
 
-def categories_kb(categories):
-    """Генерирует кнопки категорий"""
+def categories_kb(categories_with_counts):
+    """Генерирует кнопки категорий с количеством свободных"""
     builder = InlineKeyboardBuilder()
-    for cat in categories:
-        builder.button(text=cat.name, callback_data=f"cat_{cat.id}")
+    for cat, free_count in categories_with_counts:
+        text = f"{cat.name} ({free_count} свободно)" if free_count > 0 else cat.name
+        builder.button(text=text, callback_data=f"cat_{cat.id}")
     builder.adjust(2)
     return builder.as_markup()
 
-def products_kb(products):
-    """Генерирует кнопки товаров"""
+def products_kb(products_with_counts):
+    """Генерирует кнопки товаров с количеством свободных"""
     builder = InlineKeyboardBuilder()
-    for prod in products:
+    for prod, free_count in products_with_counts:
         price_fmt = f"{prod.price / 100:.2f}"
-        builder.button(text=f"{prod.name} | {price_fmt}{settings.CURRENCY_SYMBOL}", callback_data=f"prod_{prod.id}")
+        text = f"{prod.name} | {price_fmt}{settings.CURRENCY_SYMBOL}"
+        if free_count > 0:
+            text += f" ({free_count} свободно)"
+        builder.button(text=text, callback_data=f"prod_{prod.id}")
     builder.adjust(1)
     builder.button(text="🔙 Назад к категориям", callback_data="back_to_cats")
     return builder.as_markup()

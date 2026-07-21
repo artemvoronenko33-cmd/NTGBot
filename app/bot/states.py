@@ -17,3 +17,7 @@ class WorkerUploadStates(StatesGroup):
 class AdminStates(StatesGroup):
     waiting_for_add_worker_id = State()
     waiting_for_del_worker_id = State()
+
+class AdminImportStates(StatesGroup):
+    waiting_for_category = State()   # выбор категории
+    waiting_for_text = State()        # ожидание TXT-файла

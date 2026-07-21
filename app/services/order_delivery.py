@@ -8,8 +8,9 @@ from typing import List, Dict, Optional, Tuple
 
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy import select
+from sqlalchemy.orm import selectinload
 
-from app.db.models import Order, OrderItem, AccountItem, OrderStatus
+from app.db.models import Order, OrderItem, AccountItem, OrderStatus, Product
 from app.services.storage import StorageService
 
 logger = logging.getLogger(__name__)
@@ -164,9 +165,19 @@ class OrderDeliveryService:
         await session.commit()  # <--- добавить
         return success
 
+
+
     async def build_order_archive(self, session: AsyncSession, order_id: int) -> Tuple[Optional[bytes], str]:
-        """Собирает архив (оставляем как было, но с улучшенными логами)"""
-        order = await session.get(Order, order_id)
+        """Собирает архив с чёткой категорией из БД"""
+        # Правильная предзагрузка всех связей
+        stmt = select(Order).where(Order.id == order_id).options(
+            selectinload(Order.items)
+            .selectinload(OrderItem.product)
+            .selectinload(Product.category)
+        )
+        result = await session.execute(stmt)
+        order = result.scalar_one_or_none()
+
         if not order:
             return None, ""
 
@@ -180,17 +191,36 @@ class OrderDeliveryService:
                     zipf.setpassword(password.encode('utf-8'))
 
                     total_files = 0
-                    for item in order.items:
-                        for s3_prefix in (item.reserved_accounts or []):
-                            logger.info(f"Order {order_id} → скачиваем {s3_prefix}")
-                            local_files = await self._download_account_from_s3(s3_prefix)
 
+                    for item in order.items:
+                        category_name = "Без_категории"
+                        try:
+                            # Теперь категория должна быть загружена
+                            if item.product and item.product.category:
+                                category_name = item.product.category.name
+                            elif item.product and item.product.name:
+                                category_name = item.product.name.split()[0]
+                            elif getattr(item, 'product_name', None):
+                                category_name = item.product_name.split()[0]
+                        except Exception as e:
+                            logger.warning(f"Проблема с категорией для item {item.id}: {e}")
+
+                        safe_category = "".join(
+                            c if c.isalnum() or c in " _-()" else "_"
+                            for c in category_name
+                        ).strip() or "uncategorized"
+
+                        for s3_prefix in (getattr(item, 'reserved_accounts', []) or []):
+                            logger.info(f"Order {order_id} → Категория '{category_name}' → {s3_prefix}")
+
+                            local_files = await self._download_account_from_s3(s3_prefix)
                             if not local_files:
-                                logger.error(f"Аккаунт неожиданно пуст: {s3_prefix}")
+                                logger.error(f"Аккаунт пуст: {s3_prefix}")
                                 continue
 
                             for rel_path, data in local_files.items():
-                                zipf.writestr(rel_path, data)
+                                full_rel_path = f"{safe_category}/{rel_path}"
+                                zipf.writestr(full_rel_path, data)
                                 total_files += 1
 
                     if total_files == 0:
@@ -205,14 +235,17 @@ class OrderDeliveryService:
             order.delivery_info["password"] = password
             order.status = OrderStatus.COMPLETED.value
 
+            await session.commit()
+
         except Exception as e:
             logger.error(f"Failed to build archive for order {order_id}: {e}", exc_info=True)
+            await session.rollback()
             return None, ""
 
         # Очистка S3
         try:
             for item in order.items:
-                for s3_prefix in (item.reserved_accounts or []):
+                for s3_prefix in (getattr(item, 'reserved_accounts', []) or []):
                     prefix = s3_prefix.rstrip('/') + '/'
                     response = self.storage.s3_client.list_objects_v2(
                         Bucket=self.storage.bucket, Prefix=prefix

@@ -6,10 +6,10 @@ Repository для работы с категориями и продуктами
 
 import logging
 from typing import List, Optional
-from sqlalchemy import select
+from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.db.models import Category, Product
+from app.db.models import Category, Product, AccountItem
 
 logger = logging.getLogger(__name__)
 
@@ -137,3 +137,35 @@ class CategoryRepository:
         except Exception as e:
             logger.error(f"Error fetching product with category {product_id}: {e}")
             raise
+
+    @staticmethod
+    async def get_all_active_categories_with_counts(session: AsyncSession):
+        """Категории + количество свободных аккаунтов"""
+        stmt = select(
+            Category,
+            func.count(AccountItem.id).label("free_count")
+        ).outerjoin(
+            Product, Product.category_id == Category.id
+        ).outerjoin(
+            AccountItem,
+            (AccountItem.product_id == Product.id) & (AccountItem.status == "free")
+        ).where(Category.__table__.c.id.isnot(None)).group_by(Category.id).order_by(Category.name)
+
+        result = await session.execute(stmt)
+        return result.all()  # [(category, free_count), ...]
+
+    @staticmethod
+    async def get_active_products_by_category_with_counts(session: AsyncSession, category_id: int):
+        """Товары категории + количество свободных"""
+        stmt = select(
+            Product,
+            func.count(AccountItem.id).label("free_count")
+        ).outerjoin(
+            AccountItem,
+            (AccountItem.product_id == Product.id) & (AccountItem.status == "free")
+        ).where(
+            (Product.category_id == category_id) & (Product.is_active == True)
+        ).group_by(Product.id).order_by(Product.name)
+
+        result = await session.execute(stmt)
+        return result.all()  # [(product, free_count), ...]
