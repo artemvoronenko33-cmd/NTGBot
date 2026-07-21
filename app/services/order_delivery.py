@@ -157,7 +157,7 @@ class OrderDeliveryService:
                 AccountItem.product_id == item.product_id,
                 AccountItem.is_reserved == False,
                 AccountItem.status == "free"
-            ).with_for_update().limit(needed * 6)
+            ).with_for_update(skip_locked=True).limit(needed * 6)
 
             result = await session.execute(stmt)
             candidates = result.scalars().all()
@@ -171,15 +171,20 @@ class OrderDeliveryService:
                     really_available.append(acc)
                 else:
                     await self._move_to_lost_empty(acc.s3_prefix)
-                    await session.delete(acc)
+                    try:
+                        await session.delete(acc)
+                    except Exception as ex:
+                        logger.warning(f"Failed to delete empty AccountItem {acc.s3_prefix}: {ex}")
                     logger.warning(f"Пустой аккаунт (0 файлов) → lost_empty и удалён: {acc.s3_prefix}")
 
             reserved_count = len(really_available)
 
             if reserved_count > 0:
                 item.reserved_accounts = item.reserved_accounts or []
+                reserved_assigned = 0
                 for acc in really_available[:needed]:
                     logger.info(f"Резервируем: {acc.s3_prefix}")
+
                     item.reserved_accounts.append(acc.s3_prefix)
 
                     acc.is_reserved = True
@@ -187,7 +192,17 @@ class OrderDeliveryService:
                     acc.reserved_at = datetime.utcnow()
                     acc.status = "reserved"
 
-                item.delivered_quantity = (item.delivered_quantity or 0) + min(reserved_count, needed)
+                    # Немедленно flush — чтобы изменения видны другим транзакциям/селекторам
+                    try:
+                        await session.flush()
+                    except Exception as ex:
+                        logger.warning(f"Flush failed after reserving {acc.s3_prefix}: {ex}")
+
+                    logger.debug(f"Reserved AccountItem {acc.s3_prefix} for order {order_id}")
+                    reserved_assigned += 1
+
+                # увеличиваем delivered_quantity на реально назначенное количество
+                item.delivered_quantity = (item.delivered_quantity or 0) + reserved_assigned
 
             delivery_info["items"][str(item.product_id)] = {
                 "needed": item.quantity,
@@ -286,7 +301,9 @@ class OrderDeliveryService:
                         ).strip() or "product"
 
                         # 4) Обрабатываем каждый зарезервированный префикс (аккаунт)
-                        for s3_prefix in (getattr(item, 'reserved_accounts', []) or []):
+                        # Обрабатываем каждый зарезервированный префикс (аккаунт)
+                        prefixes = list(getattr(item, 'reserved_accounts', []) or [])
+                        for idx, s3_prefix in enumerate(prefixes):
                             logger.info(
                                 f"Order {order_id} → Category '{category_name}' | Product '{product_name_raw}' → {s3_prefix}")
 
@@ -295,13 +312,34 @@ class OrderDeliveryService:
                                 logger.error(f"Аккаунт пуст или не удалось скачать: {s3_prefix}")
                                 continue
 
-                            # local_files keys уже содержат account_folder_name/...
+                            # Определяем оригинальное имя папки аккаунта (возвращается в ключах local_files)
+                            first_key = next(iter(local_files.keys()), None)
+                            if first_key and '/' in first_key:
+                                original_account_folder = first_key.split('/', 1)[0]
+                            else:
+                                # fallback на кусок из s3_prefix
+                                original_account_folder = s3_prefix.rstrip('/').split('/')[-1] or f"acct_{idx}"
+
+                            # Делаем уникальный маркер для папки аккаунта, чтобы избежать перезаписи файлов
+                            uniq_suffix = s3_prefix.rstrip('/').split('/')[-1]
+                            unique_account_folder = f"{original_account_folder}_{uniq_suffix}_{idx}"
+
+                            logger.debug(
+                                f"Using unique account folder '{unique_account_folder}' for prefix {s3_prefix}")
+
+                            files_added = 0
                             for rel_path, data in local_files.items():
-                                # теперь структура в ZIP: category/product/account_folder/.../file
-                                full_rel_path = f"{safe_category}/{safe_product}/{rel_path}"
+                                # rel_path обычно "account_folder_name/..." — убираем оригинальную папку и подставляем уникальную
+                                parts = rel_path.split('/', 1)
+                                tail = parts[1] if len(parts) > 1 else parts[0]
+                                full_rel_path = f"{safe_category}/{safe_product}/{unique_account_folder}/{tail}"
                                 logger.debug(f"Adding to zip: {full_rel_path} (from {s3_prefix})")
                                 zipf.writestr(full_rel_path, data)
                                 total_files += 1
+                                files_added += 1
+
+                            logger.info(
+                                f"Added {files_added} files from {s3_prefix} into zip as {unique_account_folder}")
 
                     if total_files == 0:
                         logger.error(f"Не удалось собрать файлы для заказа {order_id}")

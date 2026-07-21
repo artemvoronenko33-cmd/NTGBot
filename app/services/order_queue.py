@@ -20,8 +20,33 @@ class OrderQueueService:
         self.queue_key = "order:processing:queue"
 
     async def enqueue_order(self, order_id: int):
-        await redis_client.rpush(self.queue_key, str(order_id))
-        logger.info(f"Заказ #{order_id} добавлен в очередь")
+        """
+        Поставить заказ в очередь только если его там ещё нет.
+        Используем LPOS (если доступно) для быстрого поиска; при отсутствии support — fallback на LRANGE.
+        """
+        oid = str(order_id)
+        try:
+            # LPOS возвращает позицию или None
+            pos = await redis_client.lpos(self.queue_key, oid)
+            if pos is not None:
+                logger.debug(f"Order #{order_id} already present in queue at position {pos}, skipping enqueue")
+                return
+        except Exception:
+            # fallback: читаем список (costly), но безопасно
+            try:
+                existing = await redis_client.lrange(self.queue_key, 0, -1)
+                if oid in existing:
+                    logger.debug(f"Order #{order_id} already present in queue (fallback), skipping enqueue")
+                    return
+            except Exception as ex:
+                logger.warning(f"Failed to check existing queue entries for dedupe: {ex}")
+                # продолжим попытку поставить в очередь
+
+        try:
+            await redis_client.rpush(self.queue_key, oid)
+            logger.info(f"Заказ #{order_id} добавлен в очередь")
+        except Exception as ex:
+            logger.error(f"Failed to enqueue order #{order_id} to Redis: {ex}")
 
     async def enqueue_all_pending(self, session: AsyncSession):
         """Добавляет все PAID и PARTIAL заказы в очередь"""
@@ -48,6 +73,7 @@ class OrderQueueService:
         try:
             # ==================== БЕРЁМ ЗАКАЗ ИЗ ОЧЕРЕДИ ====================
             order_id_str = await redis_client.lpop(self.queue_key)
+            logger.debug(f"Popped order_id_str from Redis queue '{self.queue_key}': {order_id_str}")
             if not order_id_str:
                 return
 
@@ -62,12 +88,23 @@ class OrderQueueService:
             result = await session.execute(stmt)
             order = result.scalar_one_or_none()
 
-            if not order or order.status not in [OrderStatus.PAID.value, OrderStatus.PARTIAL.value]:
-                logger.info(f"Заказ #{order_id} пропущен (статус: {order.status if order else 'None'})")
+            if not order:
+                logger.info(f"Заказ #{order_id} не найден, пропускаем")
                 return
 
-            # ==================== РЕЗЕРВИРОВАНИЕ ====================
-            reserved = await self.delivery_service.reserve_accounts_for_order(session, order_id)
+            # Разрешаем обрабатывать заказы со статусами PAID, PARTIAL и PROCESSING
+            if order.status not in [OrderStatus.PAID.value, OrderStatus.PARTIAL.value, OrderStatus.PROCESSING.value]:
+                logger.info(f"Заказ #{order_id} пропущен (неподдерживаемый статус: {order.status})")
+                return
+
+            # ==================== РЕЗЕРВИРОВАНИЕ (только если ещё не в PROCESSING) ====================
+            if order.status in [OrderStatus.PAID.value, OrderStatus.PARTIAL.value]:
+                logger.info(f"Заказ #{order_id} в статусе {order.status} — запускаем резервирование")
+                reserved = await self.delivery_service.reserve_accounts_for_order(session, order_id)
+            else:
+                # order.status == PROCESSING — предполагаем, что резервирование уже выполнено ранее
+                logger.info(f"Заказ #{order_id} уже в PROCESSING — пропускаем шаг резервирования")
+                reserved = True
 
             if not reserved:
                 order.status = OrderStatus.PARTIAL.value

@@ -14,7 +14,7 @@ from app.bot.menu_admin.kb_admin import get_main_admin_kb, get_orders_admin_kb, 
 from app.bot.states import AdminStates, AdminImportStates
 from app.db.engine import async_session
 from app.db.models import User, Order, OrderItem, Payment, AccountItem, Product, Category
-from app.db.models.order import OrderStatusHistory
+from app.db.models.order import OrderStatusHistory, OrderStatus
 from app.db.repositories import CategoryRepository
 from app.services.order_delivery import OrderDeliveryService
 from config import settings  # или откуда импортируется settings
@@ -240,6 +240,20 @@ async def cmd_sync_accounts(message: Message):
                     deleted_count += 1
                 elif acc.status == "reserved" and acc.reserved_for_order_id:
                     order_id = acc.reserved_for_order_id
+
+                    # Получаем текущий статус заказа — если заказ уже COMPLETED, снимаем резерв
+                    order = await session.get(Order, order_id)
+                    if order and order.status == OrderStatus.COMPLETED.value:
+                        # Отменяем резервирование — пометка аккаунта как свободного
+                        acc.is_reserved = False
+                        acc.reserved_for_order_id = None
+                        acc.reserved_at = None
+                        acc.status = "free"
+                        logger.info(f"Unreserved {acc.s3_prefix} because order #{order_id} is already COMPLETED")
+                        # не добавляем в reserved_by_order
+                        continue
+
+                    # Иначе — группируем по заказу для показа
                     if order_id not in reserved_by_order:
                         reserved_by_order[order_id] = []
                     reserved_by_order[order_id].append({
