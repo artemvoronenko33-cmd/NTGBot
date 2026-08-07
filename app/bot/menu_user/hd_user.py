@@ -16,7 +16,7 @@ from app.bot.menu_user.kb_user import (
     cabinet_kb, products_top_kb,
 )
 from app.bot.states import TopUpStates, ProductSearchStates
-from app.db.models import User, Product, Order, OrderItem, Payment, TopUp
+from app.db.models import User, Product, Order, OrderItem, Payment, TopUp, AccountItem
 from app.db.engine import async_session
 from app.services.redis_cart import add_to_cart, get_cart, clear_cart
 from app.services.payment import create_invoice, generate_address
@@ -261,8 +261,6 @@ async def process_product_search(message: Message, state: FSMContext, session: A
 # ==================== Выбор товара (callback) ====================
 @router.callback_query(F.data.startswith("prod_"))
 async def process_product(callback: CallbackQuery):
-    logger.debug(f"Processing product selection. Data: {callback.data}")
-
     try:
         prod_id = int(callback.data.split("_")[1])
     except (IndexError, ValueError):
@@ -270,16 +268,36 @@ async def process_product(callback: CallbackQuery):
         return
 
     async with async_session() as session:
-        stmt = select(Product).where(Product.id == prod_id)
-        result = await session.execute(stmt)
-        prod = result.scalar_one()
+        prod = await session.get(Product, prod_id)
+        if not prod or not prod.is_active:
+            await callback.answer("❌ Товар недоступен", show_alert=True)
+            return
 
-        price_fmt = f"{prod.price / 100:.2f}{settings.CURRENCY_SYMBOL}"
-        text = f"📦 <b>{prod.name}</b>\n💰 {price_fmt}\n\n{prod.description}"
+        # Количество свободных
+        free_count = (await session.execute(
+            select(func.count(AccountItem.id)).where(
+                AccountItem.product_id == prod_id,
+                AccountItem.status == "free"
+            )
+        )).scalar() or 0
+
+        price_fmt = f"{prod.price / 100:.1f}".replace(".", ",")
+
+        text = (
+            f"📦 <b>{prod.name}</b>\n\n"
+            f"💵 <b>Цена:</b> {price_fmt} $\n"
+            f"📦 <b>В наличии:</b> {free_count} шт.\n"
+            f"🏪 <b>Продавец:</b> Основной магазин\n"
+            f"⚡ <b>Выдача:</b> автоматически после оплаты\n\n"
+            f"⚠️ <b>Важная информация</b>\n"
+            f"• Проверьте название товара, страну, продавца и цену.\n"
+            f"• После получения сразу проверьте приобретённый товар и поменяйте всю имеющую информацию!"
+        )
 
         await callback.message.answer(
             text,
-            reply_markup=product_detail_kb(prod.id, prod.category_id)
+            reply_markup=product_detail_kb(prod.id, prod.category_id),
+            parse_mode="HTML"
         )
         await callback.answer()
         await callback.message.delete()
@@ -325,31 +343,51 @@ async def view_cart(message: Message):
 # 3. Оформление заказа
 @router.callback_query(F.data == "checkout")
 async def checkout(callback: CallbackQuery):
-    # Простая проверка перед созданием заказа
-
     cart_items = await get_cart(callback.from_user.id)
     if not cart_items:
         await callback.answer("Корзина пуста!", show_alert=True)
         return
 
     total_sum = 0
+    out_of_stock = []
+
     async with async_session() as session:
         for item in cart_items:
-            stmt = select(Product).where(Product.id == item['product_id'])
-            prod = (await session.execute(stmt)).scalar_one()
-            total_sum += prod.price * item['qty']
+            prod = await session.get(Product, item["product_id"])
+            if not prod:
+                continue
 
-        stmt = select(User).where(User.id == callback.from_user.id)
-        user = (await session.execute(stmt)).scalar_one_or_none()
-    balance_usd = (user.balance / 100) if user else 0.0
+            free_count = (await session.execute(
+                select(func.count(AccountItem.id)).where(
+                    AccountItem.product_id == prod.id,
+                    AccountItem.status == "free"
+                )
+            )).scalar() or 0
 
-    # ✅ Показываем итог и кнопку подтверждения
+            if free_count < item["qty"]:
+                out_of_stock.append(f"{prod.name} (в наличии {free_count} из {item['qty']})")
+
+            total_sum += prod.price * item["qty"]
+
+        user = await session.get(User, callback.from_user.id)
+        balance_usd = (user.balance / 100) if user else 0.0
+
+    if out_of_stock:
+        text = (
+            "⚠️ <b>Внимание, оформление предзаказа!</b>\n"
+            + "\nНекоторые товары еще не готовы:\n"
+            + "\n".join(f"• {x}" for x in out_of_stock)
+            + "\n\n⏳ Заказ будет собран и автоматически выдан в течение: "+"<b>48 часов</b>."
+            + "\n🔄 В противном случае деньги вернутся на баланс."
+        )
+        await callback.message.answer(text, parse_mode="HTML")
+
     await callback.message.answer(
         f"📋 <b>Подтверждение заказа</b>\n"
         f"Сумма: {total_sum / 100}{settings.CURRENCY_SYMBOL}\n"
         f"Товаров: {len(cart_items)}\n\n"
         f"💳 <b>Ваш баланс:</b> <b>${balance_usd:.2f}</b>\n"
-        f"Нажмите «Оплатить» для перехода к оплате.",
+        f"Выберете способ оплаты:",
         reply_markup=checkout_confirm_kb(),
         parse_mode="HTML"
     )

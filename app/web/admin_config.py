@@ -281,9 +281,13 @@ class ProductAdmin(ModelView, model=Product):
     column_formatters = {Product.price: lambda obj, prop: format_currency(obj.price, symbol="$")}
 
 class CategoryAdmin(ModelView, model=Category):
-    column_list = [Category.id, Category.name]
-    column_labels = {Category.name: "Название"}
+    column_list = [Category.id, Category.name, Category.is_active]
+    column_labels = {
+        Category.name: "Название",
+        Category.is_active: "Активна"
+    }
     column_searchable_list = [Category.name]
+    column_editable_list = [Category.name, Category.is_active]   # ← можно менять прямо в таблице
     can_create = True
     can_delete = True
     can_edit = True

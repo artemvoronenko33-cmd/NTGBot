@@ -29,7 +29,7 @@ class CategoryRepository:
             Exception: При ошибке БД
         """
         try:
-            stmt = select(Category).order_by(Category.name)
+            stmt = select(Category).where(Category.is_active == True).order_by(Category.name)
             result = await session.execute(stmt)
             categories = result.scalars().all()
             logger.debug(f"Fetched {len(categories)} categories")
@@ -149,7 +149,9 @@ class CategoryRepository:
         ).outerjoin(
             AccountItem,
             (AccountItem.product_id == Product.id) & (AccountItem.status == "free")
-        ).where(Category.__table__.c.id.isnot(None)).group_by(Category.id).order_by(Category.name)
+        ).where(
+            (Category.is_active == True) & (Category.__table__.c.id.isnot(None))
+        ).group_by(Category.id).order_by(Category.name)
 
         result = await session.execute(stmt)
         return result.all()  # [(category, free_count), ...]
