@@ -13,12 +13,12 @@ from app.bot.menu_admin.cmd_admin import cmd_workers, cmd_queue_status, cmd_defi
 from app.bot.menu_admin.kb_admin import get_main_admin_kb, get_orders_admin_kb, get_workers_admin_kb, get_bot_admin_kb, admin_import_categories_kb, admin_import_cancel_kb
 from app.bot.states import AdminStates, AdminImportStates
 from app.db.engine import async_session
-from app.db.models import User, Order, OrderItem, Payment, AccountItem, Product, Category
+from app.db.models import User, Order, OrderItem, Payment, AccountItem, Product, Category, BalanceTransaction
 from app.db.models.order import OrderStatusHistory, OrderStatus
 from app.db.repositories import CategoryRepository
 from app.services.order_delivery import OrderDeliveryService
 from config import settings  # или откуда импортируется settings
-from sqlalchemy import select, delete
+from sqlalchemy import select, delete, update
 
 logger = logging.getLogger(__name__)
 router = Router(name="admin_router")
@@ -179,6 +179,7 @@ async def delete_orders(message: Message, session: AsyncSession, state: FSMConte
     """Начать процесс удаления заказов"""
     await message.answer("Отправь ID заказов через запятую (например: 24,25,30)")
     await state.set_state("waiting_for_order_ids_to_delete")
+
 @router.message(StateFilter("waiting_for_order_ids_to_delete"))
 async def process_order_ids(message: Message, session: AsyncSession, state: FSMContext):
     try:
@@ -193,6 +194,7 @@ async def process_order_ids(message: Message, session: AsyncSession, state: FSMC
         await session.execute(delete(OrderItem).where(OrderItem.order_id.in_(order_ids)))
         await session.execute(delete(Payment).where(Payment.order_id.in_(order_ids)))  # ← Добавлено
         await session.execute(delete(OrderStatusHistory).where(OrderStatusHistory.order_id.in_(order_ids)))
+        await session.execute(delete(BalanceTransaction).where(BalanceTransaction.order_id.in_(order_ids)))  # ← ЭТО ГЛАВНОЕ
 
         # Удаляем заказы
         result = await session.execute(delete(Order).where(Order.id.in_(order_ids)))
