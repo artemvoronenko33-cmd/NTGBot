@@ -82,7 +82,7 @@ async def charts_page(request: Request):
     prod_rev = [float(p.rev) if p.rev else 0 for p in top_data]
     prod_qty = [p.qty for p in top_data]
 
-    max_act = max(activity_counts) if activity_counts else 1
+    max_act = max(activity_counts) or 1
 
     # --- HTML ШАБЛОН ---
     html_content = f"""
