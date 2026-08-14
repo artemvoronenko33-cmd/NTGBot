@@ -16,3 +16,5 @@ class Payment(Base):
     payment_method = Column(String(20), default="external")  # external, balance, telegram
     created_at = Column(DateTime, server_default=func.now())
     updated_at = Column(DateTime, server_default=func.now(), onupdate=func.now())
+    expected_crypto = Column(Float, nullable=True)   # ожидаемая сумма в crypto
+    currency = Column(String(20), nullable=True)     # USDTTRC, BTC, ...

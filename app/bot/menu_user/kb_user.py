@@ -119,6 +119,14 @@ def topup_currency_kb() -> InlineKeyboardMarkup:
     builder.row(InlineKeyboardButton(text="❌ Отмена", callback_data="topup_cancel"))
     return builder.as_markup()
 
+def order_currency_kb() -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+    for ticker, (name, emoji) in TOPUP_CURRENCIES.items():
+        builder.button(text=f"{emoji} {name}", callback_data=f"order_cur_{ticker}")
+    builder.adjust(2)
+    builder.row(InlineKeyboardButton(text="❌ Отмена", callback_data="cancel_checkout"))
+    return builder.as_markup()
+
 def admin_order_kb(order_id: int, is_paid: bool) -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     if is_paid:

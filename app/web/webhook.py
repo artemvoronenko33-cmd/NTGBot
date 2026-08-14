@@ -32,11 +32,12 @@ async def ipn_handler(request: Request):
     if not label or not status:
         return {"ok": True}
 
+    received_amount = _parse_float(data.get("amount"))
+
     if label.startswith("topup_"):
-        received_amount = _parse_float(data.get("amount"))
         await _handle_topup_ipn(label, status, received_amount)
     else:
-        await _handle_order_ipn(label, status)
+        await _handle_order_ipn(label, status, received_amount)
 
     return {"ok": True}
 
@@ -48,7 +49,7 @@ def _parse_float(value) -> float:
         return 0.0
 
 
-async def _handle_order_ipn(label: str, status: str) -> None:
+async def _handle_order_ipn(label: str, status: str, received_amount: float = 0.0) -> None:
     try:
         order_id = int(label)
     except ValueError:
@@ -69,21 +70,84 @@ async def _handle_order_ipn(label: str, status: str) -> None:
             return
 
     async with async_session() as session:
-        stmt = select(Payment).where(Payment.order_id == order_id)
-        payment = (await session.execute(stmt)).scalar_one_or_none()
+        payment = (
+            await session.execute(
+                select(Payment).where(Payment.order_id == order_id)
+            )
+        ).scalar_one_or_none()
 
         if not payment or payment.status == "completed":
             return
 
-        payment.status = "completed"
-        await session.execute(
-            update(Order).where(Order.id == order_id).values(status="paid")
-        )
-        await session.commit()
-        user_id = payment.user_id
+        order = await session.get(Order, order_id)
+        if not order or order.status in ("paid", "completed", "cancelled", "refunded"):
+            return
 
-    from app.bot.notifier import notify_payment_success
-    await notify_payment_success(user_id, order_id)
+        # --- TTL 24 часа ---
+        from datetime import datetime, timedelta
+        MAX_AGE_HOURS = 24
+        if order.created_at and datetime.utcnow() - order.created_at.replace(tzinfo=None) > timedelta(hours=MAX_AGE_HOURS):
+            logger.warning("Order %s IPN too late (>%sh)", order_id, MAX_AGE_HOURS)
+            payment.status = "expired"
+            order.status = "cancelled"
+            await session.commit()
+            return
+
+        # --- Недоплата (crypto_qr) ---
+        if payment.payment_method == "crypto_qr" and payment.expected_crypto:
+            TOLERANCE = 1e-6
+            expected = float(payment.expected_crypto)
+            if received_amount + TOLERANCE < expected:
+                logger.warning(
+                    "Недоплата по заказу %s: получено %.8f, ожидалось %.8f",
+                    order_id, received_amount, expected,
+                )
+                payment.status = "underpaid"
+                await session.commit()
+                return
+
+        logger.info(
+            "Order %s IPN: received_crypto=%.8f, order_usd=%.2f, method=%s",
+            order_id, received_amount, payment.amount_usd, payment.payment_method,
+        )
+
+        payment.status = "completed"
+        order.status = "paid"
+        user_id = payment.user_id
+        amount_usd = payment.amount_usd
+        pay_method = payment.payment_method or "external"
+        await session.commit()
+
+    # Уведомление
+    try:
+        from app.bot.notifier import notify_payment_success
+        await notify_payment_success(
+            user_id, order_id, amount_usd=amount_usd, payment_method=pay_method
+        )
+    except Exception:
+        logger.exception("notify_payment_success failed for order %s", order_id)
+
+    # Очередь выдачи
+    try:
+        from app.services.order_queue import OrderQueueService
+        await OrderQueueService().enqueue_order(order_id)
+        logger.info("Order #%s enqueued after payment", order_id)
+    except Exception as e:
+        logger.error("Failed to enqueue order %s: %s", order_id, e)
+
+    # Крупный платёж
+    try:
+        if amount_usd >= settings.LARGE_PAYMENT_THRESHOLD_USD:
+            from app.bot.notifier import notify_admin_large_payment
+            await notify_admin_large_payment(
+                user_id=user_id,
+                order_id=order_id,
+                amount_usd=amount_usd,
+                username=None,
+                payment_method=pay_method,
+            )
+    except Exception:
+        logger.exception("Failed large payment notify for order %s", order_id)
 
 
 async def _handle_topup_ipn(label: str, status: str, received_amount: float) -> None:

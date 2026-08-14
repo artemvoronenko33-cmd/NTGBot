@@ -7,12 +7,29 @@ from config import settings
 logger = logging.getLogger(__name__)
 
 
-async def notify_payment_success(user_id: int, order_id: int) -> None:
+async def notify_payment_success(
+    user_id: int,
+    order_id: int,
+    amount_usd: float | None = None,
+    payment_method: str = "external",
+) -> None:
+    """Уведомление пользователю об успешной оплате заказа"""
     try:
+        method_text = {
+            "balance": "💳 Списано с баланса",
+            "crypto_qr": "🪙 Оплата криптовалютой получена",
+            "external": "💰 Оплата получена",
+        }.get(payment_method, "💰 Оплата получена")
+
+        amount_line = f"\n💵 Сумма: <b>${amount_usd:.2f}</b>" if amount_usd is not None else ""
+
         await bot.send_message(
             user_id,
             f"✅ <b>Оплата подтверждена!</b>\n\n"
-            f"Заказ <b>#{order_id}</b> успешно оплачен.\nСпасибо за покупку!",
+            f"📋 Заказ <b>#{order_id}</b>\n"
+            f"{method_text}{amount_line}\n\n"
+            f"📦 Товары уже в обработке. Выдача начнётся автоматически.",
+            parse_mode="HTML",
         )
     except Exception:
         logger.exception("Не удалось отправить уведомление пользователю %s", user_id)
@@ -27,51 +44,41 @@ async def notify_topup_success(user_id: int, amount_usd: float, topup_id: int) -
             f"✅ <b>Баланс пополнен!</b>\n\n"
             f"💲 Зачислено: <b>${amount_usd:.2f}</b>\n"
             f"🔹 Заявка №{request_num}",
-        )
-        logger.info("✅ Уведомление отправлено пользователю %s", user_id)
-    except Exception:
-        logger.exception("❌ Не удалось уведомить пользователя %s о пополнении", user_id)
-
-
-# app/bot/notifier.py
-
-async def notify_order_paid(user_id: int, order_id: int) -> None:
-    """Уведомление об успешной оплате заказа с баланса"""
-    logger.info("notify_order_paid: user=%s order=%s", user_id, order_id)
-    try:
-        await bot.send_message(
-            user_id,
-            f"✅ <b>Заказ #{order_id} оплачен!</b>\n\n"
-            f"💳 Списано с баланса.\n"
-            f"📦 Товары уже в обработке.",
+            parse_mode="HTML",
         )
     except Exception:
-        logger.exception("Не удалось отправить уведомление о заказе %s пользователю %s", order_id, user_id)
+        logger.exception("Не удалось уведомить пользователя %s о пополнении", user_id)
 
-        # app/bot/notifier.py
 
 async def notify_admin_large_payment(
-        user_id: int,
-        order_id: int,
-        amount_usd: float,
-        username: str | None = None,
+    user_id: int,
+    order_id: int,
+    amount_usd: float,
+    username: str | None = None,
+    payment_method: str = "balance",
 ) -> None:
-    """Отправляет уведомление в админ-чат о крупной оплате"""
+    """Уведомление админам о крупной оплате"""
     if not settings.ADMIN_CHAT_ID:
         return
+
+    method_label = {
+        "balance": "с баланса",
+        "crypto_qr": "криптой (QR)",
+        "external": "внешняя",
+    }.get(payment_method, payment_method)
 
     try:
         await bot.send_message(
             chat_id=settings.ADMIN_CHAT_ID,
             text=(
-                f"💰 <b>Крупная оплата с баланса</b>\n\n"
-                f"👤 Пользователь: @{username} (`{user_id}`)\n"
+                f"💰 <b>Крупная оплата ({method_label})</b>\n\n"
+                f"👤 Пользователь: @{username or '—'} (`{user_id}`)\n"
                 f"📋 Заказ: #{order_id}\n"
                 f"💵 Сумма: <b>${amount_usd:.2f}</b>\n"
-                f"⏰ Время: {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}"
+                f"⏰ {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')} UTC"
             ),
             parse_mode="HTML",
         )
-        logger.info("Admin notified about large payment: order=%s amount=$%.2f", order_id, amount_usd)
+        logger.info("Admin notified: order=%s amount=$%.2f method=%s", order_id, amount_usd, payment_method)
     except Exception:
         logger.exception("Failed to send admin notification for order %s", order_id)

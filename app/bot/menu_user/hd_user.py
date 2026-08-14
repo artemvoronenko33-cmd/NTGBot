@@ -13,9 +13,9 @@ from app.bot.menu_user.kb_user import (
     main_menu_kb, categories_kb, products_kb, product_detail_kb,
     cart_view_kb, checkout_confirm_kb, payment_link_kb,
     balance_kb, cancel_topup_kb, topup_currency_kb, TOPUP_CURRENCIES,
-    cabinet_kb, products_top_kb, cart_items_kb,
+    cabinet_kb, products_top_kb, cart_items_kb, order_currency_kb,
 )
-from app.bot.states import TopUpStates, ProductSearchStates
+from app.bot.states import TopUpStates, ProductSearchStates, OrderPaymentStates
 from app.db.models import User, Product, Order, OrderItem, Payment, TopUp, AccountItem
 from app.db.engine import async_session
 from app.services.redis_cart import add_to_cart, get_cart, clear_cart
@@ -523,6 +523,199 @@ async def back_to_categories(callback: CallbackQuery, session: AsyncSession):
     await show_categories(callback.message, session)
     await callback.answer()
 
+# ==================== Оплата QR ====================
+@router.callback_query(F.data == "pay_order_crypto")
+async def pay_order_crypto_start(callback: CallbackQuery, state: FSMContext):
+    """Начало оплаты заказа криптой — выбор монеты"""
+    cart_items = await get_cart(callback.from_user.id)
+    if not cart_items:
+        await callback.answer("🛒 Корзина пуста!", show_alert=True)
+        return
+
+    await state.set_state(OrderPaymentStates.waiting_for_currency)
+
+    await callback.message.edit_text(
+        "🪙 <b>Выберите монету для оплаты заказа:</b>",
+        reply_markup=order_currency_kb(),
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+@router.callback_query(F.data.startswith("order_cur_"), OrderPaymentStates.waiting_for_currency)
+async def order_currency_selected(callback: CallbackQuery, state: FSMContext):
+    ticker = callback.data.removeprefix("order_cur_")
+    if ticker not in TOPUP_CURRENCIES:
+        await callback.answer("❌ Неизвестная монета", show_alert=True)
+        return
+
+    cur_name, _ = TOPUP_CURRENCIES[ticker]
+    user_id = callback.from_user.id
+    cart_items = await get_cart(user_id)
+
+    if not cart_items:
+        await state.clear()
+        await callback.message.edit_text("🛒 Корзина пуста.")
+        await callback.answer()
+        return
+
+    # --- Rate-limit ---
+    if not await check_rate_limit(
+        user_id,
+        max_attempts=settings.PAYMENT_RATE_LIMIT_ATTEMPTS,
+        window_seconds=settings.PAYMENT_RATE_LIMIT_WINDOW,
+    ):
+        await state.clear()
+        await callback.message.edit_text("⚠️ Слишком много попыток. Подождите 1 минуту.")
+        log_rate_limit_hit(
+            user_id,
+            settings.PAYMENT_RATE_LIMIT_ATTEMPTS,
+            settings.PAYMENT_RATE_LIMIT_WINDOW,
+        )
+        return
+
+    await callback.message.edit_text(
+        f"✅ Выбрано: <b>{cur_name}</b>\n\n⏳ Создаём заказ и генерируем адрес...",
+        parse_mode="HTML",
+    )
+    await callback.answer()
+
+    try:
+        price_usd = await asyncio.wait_for(get_price_usd(ticker), timeout=5.0)
+
+        async with async_session() as session:
+            # --- Запрет второго pending-заказа ---
+            existing = (
+                await session.execute(
+                    select(Order)
+                    .where(
+                        Order.user_id == user_id,
+                        Order.status == "pending_payment",
+                    )
+                    .limit(1)
+                )
+            ).scalar_one_or_none()
+
+            if existing:
+                raise ValueError(
+                    f"У вас уже есть неоплаченный заказ #{existing.id}. "
+                    f"Оплатите его или дождитесь истечения."
+                )
+
+            total_cents = 0
+            products_data = []
+            out_of_stock = []
+
+            for item in cart_items:
+                prod = await session.get(Product, item["product_id"])
+                if not prod or not prod.is_active:
+                    raise ValueError(f"Товар недоступен (id={item['product_id']})")
+
+                free_count = (
+                    await session.execute(
+                        select(func.count(AccountItem.id)).where(
+                            AccountItem.product_id == prod.id,
+                            AccountItem.status == "free",
+                        )
+                    )
+                ).scalar() or 0
+
+                if free_count < item["qty"]:
+                    out_of_stock.append(
+                        f"{prod.name} (нужно {item['qty']}, есть {free_count})"
+                    )
+
+                total_cents += prod.price * item["qty"]
+                products_data.append((prod, item["qty"]))
+
+            if out_of_stock:
+                logger.warning("Crypto order stock issues user=%s: %s", user_id, out_of_stock)
+                # Раскомментируйте, если нужно жёстко блокировать:
+                # raise ValueError("Недостаточно товара:\n" + "\n".join(f"• {x}" for x in out_of_stock))
+
+            total_usd = total_cents / 100
+            amount_crypto = usd_to_crypto(total_usd, price_usd, decimals=8)
+            amount_str = f"{amount_crypto:.8f}"
+
+            order = Order(
+                user_id=user_id,
+                status="pending_payment",
+                total_price=total_usd,
+            )
+            session.add(order)
+            await session.flush()
+
+            for prod, qty in products_data:
+                session.add(
+                    OrderItem(
+                        order_id=order.id,
+                        product_id=prod.id,
+                        product_name=prod.name,
+                        quantity=qty,
+                        price_at_purchase=prod.price / 100,
+                    )
+                )
+
+            label = str(order.id)
+            addr = await asyncio.wait_for(
+                generate_address(label, currency=ticker),
+                timeout=10.0,
+            )
+
+            payment = Payment(
+                order_id=order.id,
+                user_id=user_id,
+                amount_usd=total_usd,
+                status="pending",
+                payment_method="crypto_qr",
+                expected_crypto=amount_crypto,
+                currency=ticker,
+            )
+            session.add(payment)
+            await session.commit()
+
+            order_id = order.id
+
+        await clear_cart(user_id)
+        await state.clear()
+
+        if price_usd >= 1:
+            rate_str = f"${price_usd:,.2f}"
+        else:
+            rate_str = f"${price_usd:,.6f}"
+
+        text = (
+            f"📋 <b>Заказ #{order_id}</b>\n"
+            f"🪙 Оплата: <b>{cur_name}</b>\n"
+            f"💲 Сумма: <b>${total_usd:.2f}</b>\n"
+            f"📈 Курс: 1 {ticker} = {rate_str}\n\n"
+            f"💼 <b>Адрес:</b>\n<code>{addr.address}</code>\n"
+            f"🪙 <b>К оплате:</b> <code>{amount_str}</code> {ticker}\n\n"
+            f"❗️Переведите <b>точно</b> указанную сумму.\n"
+            f"❗️Если отправите меньше — заказ не будет оплачен.\n\n"
+            f"⚠️ Реквизиты действительны для <b>одного</b> платежа."
+        )
+
+        photo = BufferedInputFile(_make_qr(addr.address), filename="qr.png")
+        await callback.message.answer_photo(photo, caption=text, parse_mode="HTML")
+
+        log_payment_start(
+            user_id, order_id=order_id, amount_usd=total_usd, payment_method="crypto_qr"
+        )
+        logger.info(
+            "Crypto QR order created: user=%s order=%s amount=%.2f %s",
+            user_id, order_id, total_usd, ticker,
+        )
+
+    except asyncio.TimeoutError:
+        await state.clear()
+        await callback.message.answer("⏱️ Сервис временно недоступен. Попробуйте позже.")
+    except ValueError as e:
+        await state.clear()
+        await callback.message.answer(f"❌ {e}")
+    except Exception:
+        await state.clear()
+        logger.exception("Failed to create crypto order for user %s", user_id)
+        await callback.message.answer("❌ Не удалось создать заказ. Попробуйте позже.")
 # ==================== Оплата с баланса ====================
 
 @router.callback_query(F.data == "pay_order_f_balance")
