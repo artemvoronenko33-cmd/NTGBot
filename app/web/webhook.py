@@ -110,7 +110,9 @@ async def _handle_topup_ipn(label: str, status: str, received_amount: float) -> 
 
         # Защита от недоплаты: принимаем только если получено ≥ ожидаемой суммы
         expected = float(topup.amount_usdt)
-        if received_amount + 1e-9 < expected:
+        # Допуск 0.000001 (1e-6) — защищает от float-ошибок, но не пропускает реальную недоплату
+        TOLERANCE = 1e-6
+        if received_amount + TOLERANCE < expected:
             logger.warning(
                 "Недоплата по топапу %s: получено %.8f, ожидалось %.8f",
                 label, received_amount, expected,

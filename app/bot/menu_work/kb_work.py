@@ -25,68 +25,50 @@ def get_worker_menu() -> ReplyKeyboardMarkup:
 
 # ==================== INLINE КЛАВИАТУРЫ ДЛЯ ВЫБОРА ====================
 
-def worker_categories_kb(categories: List[Category]) -> InlineKeyboardMarkup:
-    """
-    Inline-клавиатура со списком категорий для работника.
+from aiogram.utils.keyboard import InlineKeyboardBuilder
+from aiogram.types import InlineKeyboardButton
 
-    Args:
-        categories: Список объектов Category
+def worker_categories_kb(categories):
+    builder = InlineKeyboardBuilder()
+    for cat in categories:
+        builder.button(text=cat.name, callback_data=f"worker_cat_{cat.id}")
+    builder.adjust(2)
+    builder.button(text="❌ Отмена", callback_data="worker_cancel")
+    return builder.as_markup()
 
-    Returns:
-        InlineKeyboardMarkup с кнопками категорий
 
-    Callback формат: worker_cat_{category_id}
-    """
+def worker_products_top_kb(products_with_counts, category_id):
+    """Топ-8 товаров + кнопки Поиск / Весь список (для воркера)"""
     builder = InlineKeyboardBuilder()
 
-    for cat in categories:
-        builder.button(
-            text=f"📂 {cat.name}",
-            callback_data=f"worker_cat_{cat.id}"
-        )
+    for prod, free_count in products_with_counts:
+        text = f"{prod.name}"
+        if free_count > 0:
+            text += f" ({free_count})"
+        builder.button(text=text, callback_data=f"worker_prod_{prod.id}")
 
-    # Кнопки расположены в 2 колонны для компактности
-    builder.adjust(2)
+    builder.adjust(1)
 
-    # Добавляем кнопку отмены отдельным рядом
     builder.row(
-        InlineKeyboardButton(text="❌ Отмена", callback_data="worker_cancel")
+        InlineKeyboardButton(text="🔍 Поиск", callback_data=f"worker_search_{category_id}"),
+        InlineKeyboardButton(text="📋 Весь список", callback_data=f"worker_all_{category_id}")
     )
+    builder.row(InlineKeyboardButton(text="🔙 Назад к категориям", callback_data="worker_back_to_cats"))
+    builder.row(InlineKeyboardButton(text="❌ Отмена", callback_data="worker_cancel"))
 
     return builder.as_markup()
 
 
-def worker_products_kb(products: List[Product]) -> InlineKeyboardMarkup:
-    """
-    Inline-клавиатура со списком продуктов для работника.
-
-    Args:
-        products: Список объектов Product
-
-    Returns:
-        InlineKeyboardMarkup с кнопками продуктов
-
-    Callback формат: worker_prod_{product_id}
-    """
+def worker_products_kb(products_with_counts):
+    """Полный или отфильтрованный список товаров"""
     builder = InlineKeyboardBuilder()
-
-    for prod in products:
-        # Показываем название и цену
-        price_fmt = f"{prod.price / 100:.2f}$"
-        builder.button(
-            text=f"📦 {prod.name} | {price_fmt}",
-            callback_data=f"worker_prod_{prod.id}"
-        )
-
-    # Каждый продукт на отдельной строке (более удобно для выбора)
+    for prod, free_count in products_with_counts:
+        text = f"{prod.name}"
+        if free_count > 0:
+            text += f" ({free_count})"
+        builder.button(text=text, callback_data=f"worker_prod_{prod.id}")
     builder.adjust(1)
-
-    # Добавляем навигационные кнопки отдельным рядом
-    builder.row(
-        InlineKeyboardButton(text="🔙 Назад к категориям", callback_data="worker_back_to_cats"),
-        InlineKeyboardButton(text="❌ Отмена", callback_data="worker_cancel")
-    )
-
+    builder.row(InlineKeyboardButton(text="🔙 Назад", callback_data="worker_back_to_cats"))
     return builder.as_markup()
 
 

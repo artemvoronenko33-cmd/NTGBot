@@ -79,8 +79,9 @@ def cart_view_kb() -> InlineKeyboardMarkup:
 def checkout_confirm_kb() -> InlineKeyboardMarkup:
     builder = InlineKeyboardBuilder()
     builder.button(text="💳 С баланса", callback_data="pay_order_f_balance")
-    builder.button(text="❌ Отмена", callback_data="cancel_checkout")
+    builder.button(text="🪙 Криптой (QR)", callback_data="pay_order_crypto")
     builder.adjust(2)
+    builder.button(text="❌ Отмена", callback_data="cancel_checkout")
     return builder.as_markup()
 
 def payment_link_kb(url: str) -> InlineKeyboardMarkup:
@@ -152,5 +153,40 @@ def products_top_kb(products_with_counts, category_id):
     #builder.button(text="📋 Весь список", callback_data=f"all_products_{category_id}")
     builder.button(text="🔙 Назад к категориям", callback_data="back_to_cats")
 
+
+    return builder.as_markup()
+
+def cart_items_kb(cart_items: list, products_info: dict) -> InlineKeyboardMarkup:
+    builder = InlineKeyboardBuilder()
+
+    for item in cart_items:
+        pid = item["product_id"]
+        qty = item["qty"]
+        info = products_info.get(pid)
+        if not info:
+            continue
+
+        name = info["name"]
+        free = info["free_count"]
+        price = info["price"]
+        sum_item = price * qty / 100
+
+        # Одна строка: название + кнопки управления
+        text = f"{name} ({free}) ×{qty} = {sum_item:.2f}$"
+
+        builder.row(
+            InlineKeyboardButton(text=text, callback_data=f"cart_info_{pid}"),
+        )
+        builder.row(
+            InlineKeyboardButton(text="➕➕", callback_data=f"cart_inc2_{pid}"),
+            InlineKeyboardButton(text="➕",  callback_data=f"cart_inc_{pid}"),
+            InlineKeyboardButton(text="➖",  callback_data=f"cart_dec_{pid}"),
+            InlineKeyboardButton(text="➖➖", callback_data=f"cart_dec2_{pid}"),
+            InlineKeyboardButton(text="🗑",  callback_data=f"cart_del_{pid}"),
+        )
+
+    # Кнопки внизу
+    builder.row(InlineKeyboardButton(text="✅ Оформить заказ", callback_data="checkout"),InlineKeyboardButton(text="🗑 Очистить корзину", callback_data="clear_cart"))
+    #builder.row()
 
     return builder.as_markup()

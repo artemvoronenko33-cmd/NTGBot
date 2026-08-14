@@ -13,7 +13,7 @@ from app.bot.menu_user.kb_user import (
     main_menu_kb, categories_kb, products_kb, product_detail_kb,
     cart_view_kb, checkout_confirm_kb, payment_link_kb,
     balance_kb, cancel_topup_kb, topup_currency_kb, TOPUP_CURRENCIES,
-    cabinet_kb, products_top_kb,
+    cabinet_kb, products_top_kb, cart_items_kb,
 )
 from app.bot.states import TopUpStates, ProductSearchStates
 from app.db.models import User, Product, Order, OrderItem, Payment, TopUp, AccountItem
@@ -320,25 +320,138 @@ async def view_cart(message: Message):
         await message.answer("🛒 Корзина пуста. Добавьте товары из ассортимента.")
         return
 
+    products_info = {}
     total_sum = 0
-    text = "📦 <b>Ваша корзина:</b>\n\n"
 
     async with async_session() as session:
         for item in cart_items:
-            stmt = select(Product).where(Product.id == item['product_id'])
-            result = await session.execute(stmt)
-            prod = result.scalar_one()
+            prod = await session.get(Product, item["product_id"])
+            if not prod:
+                continue
 
-            sum_item = prod.price * item['qty']
-            total_sum += sum_item
-            text += f"• {prod.name} x{item['qty']} = {sum_item / 100}{settings.CURRENCY_SYMBOL}\n"
+            free_count = (await session.execute(
+                select(func.count(AccountItem.id)).where(
+                    AccountItem.product_id == prod.id,
+                    AccountItem.status == "free"
+                )
+            )).scalar() or 0
 
-        text += f"\n💰 <b>Итого: {total_sum / 100}{settings.CURRENCY_SYMBOL}</b>"
+            products_info[prod.id] = {
+                "name": prod.name,
+                "price": prod.price,
+                "free_count": free_count
+            }
+            total_sum += prod.price * item["qty"]
+
+    text = (
+        f"🛒 <b>Ваша корзина</b>\n\n"
+        f"💰 <b>Итого: {total_sum / 100:.2f}$</b>\n\n"
+        f"Используйте кнопки ниже для изменения количества:"
+    )
+
+    await message.answer(
+        text,
+        reply_markup=cart_items_kb(cart_items, products_info),
+        parse_mode="HTML"
+    )
+
+# ==================== Управление корзиной ====================
+
+@router.callback_query(F.data.startswith("cart_inc_"))
+async def cart_increase(callback: CallbackQuery):
+    pid = int(callback.data.split("_")[2])
+    await change_cart_qty(callback, pid, +1)
+
+@router.callback_query(F.data.startswith("cart_inc2_"))
+async def cart_increase2(callback: CallbackQuery):
+    pid = int(callback.data.split("_")[2])
+    await change_cart_qty(callback, pid, +10)
+
+@router.callback_query(F.data.startswith("cart_dec_"))
+async def cart_decrease(callback: CallbackQuery):
+    pid = int(callback.data.split("_")[2])
+    await change_cart_qty(callback, pid, -1)
+
+@router.callback_query(F.data.startswith("cart_dec2_"))
+async def cart_decrease2(callback: CallbackQuery):
+    pid = int(callback.data.split("_")[2])
+    await change_cart_qty(callback, pid, -10)
+
+@router.callback_query(F.data.startswith("cart_del_"))
+async def cart_delete(callback: CallbackQuery):
+    pid = int(callback.data.split("_")[2])
+    await change_cart_qty(callback, pid, 0, delete=True)
+
+@router.callback_query(F.data.startswith("cart_info_"))
+async def cart_info(callback: CallbackQuery):
+    await callback.answer()  # просто игнорируем нажатие на название
 
 
-        # ✅ Используем вынесенную клавиатуру
-        await message.answer(text, reply_markup=cart_view_kb(), parse_mode="HTML")
+async def change_cart_qty(callback: CallbackQuery, product_id: int, delta: int, delete: bool = False):
+    from app.services.redis_cart import get_cart, set_cart
 
+    user_id = callback.from_user.id
+    cart = await get_cart(user_id)
+
+    new_cart = []
+    for item in cart:
+        if item["product_id"] == product_id:
+            if delete:
+                continue  # удаляем
+
+            new_qty = item["qty"] + delta
+            if new_qty <= 0:
+                continue  # удаляем, если стало 0 или меньше
+
+            item["qty"] = new_qty
+            new_cart.append(item)
+        else:
+            new_cart.append(item)
+
+    await set_cart(user_id, new_cart)
+
+    # Если корзина пуста
+    if not new_cart:
+        await callback.message.edit_text("🛒 Корзина пуста.")
+        await callback.answer()
+        return
+
+    # Пересчитываем и обновляем сообщение
+    products_info = {}
+    total_sum = 0
+
+    async with async_session() as session:
+        for item in new_cart:
+            prod = await session.get(Product, item["product_id"])
+            if not prod:
+                continue
+
+            free_count = (await session.execute(
+                select(func.count(AccountItem.id)).where(
+                    AccountItem.product_id == prod.id,
+                    AccountItem.status == "free"
+                )
+            )).scalar() or 0
+
+            products_info[prod.id] = {
+                "name": prod.name,
+                "price": prod.price,
+                "free_count": free_count
+            }
+            total_sum += prod.price * item["qty"]
+
+    text = (
+        f"🛒 <b>Ваша корзина</b>\n\n"
+        f"💰 <b>Итого: {total_sum / 100:.2f}$</b>\n\n"
+        f"Используйте кнопки ниже для изменения количества:"
+    )
+
+    await callback.message.edit_text(
+        text,
+        reply_markup=cart_items_kb(new_cart, products_info),
+        parse_mode="HTML"
+    )
+    await callback.answer()
 
 # 3. Оформление заказа
 @router.callback_query(F.data == "checkout")

@@ -42,7 +42,7 @@ from app.bot.menu_work.kb_work import (
     get_worker_menu,
     worker_categories_kb,
     worker_products_kb,
-    get_cancel_inline_kb,
+    get_cancel_inline_kb, worker_products_top_kb,
 )
 
 from app.services.order_queue import OrderQueueService
@@ -110,57 +110,35 @@ async def start_upload_accounts(message: Message, session: AsyncSession, state: 
 # ==================== Шаг 1а: Выбор категории (Callback) ====================
 @router.callback_query(F.data.startswith("worker_cat_"))
 async def select_worker_category(callback: CallbackQuery, session: AsyncSession, state: FSMContext):
-    """
-    Callback для выбора категории.
-    Показываем продукты выбранной категории.
-    """
-    logger.debug(f"Worker category selection: {callback.data}")
-
     try:
         category_id = int(callback.data.split("_")[2])
-    except (IndexError, ValueError) as e:
-        logger.warning(f"Failed to parse category ID from callback: {e}")
+    except (IndexError, ValueError):
         await callback.answer("❌ Ошибка формата", show_alert=True)
         return
 
-    try:
-        # Получаем информацию о категории
-        category = await CategoryRepository.get_category_by_id(session, category_id)
-        if not category:
-            logger.warning(f"Category {category_id} not found")
-            await callback.answer("❌ Категория не найдена", show_alert=True)
-            return
+    category = await CategoryRepository.get_category_by_id(session, category_id)
+    if not category:
+        await callback.answer("❌ Категория не найдена", show_alert=True)
+        return
 
-        # Получаем продукты этой категории
-        products = await CategoryRepository.get_active_products_by_category(session, category_id)
+    # Топ-8 по наличию
+    products_data = await CategoryRepository.get_top_products_by_category(session, category_id, limit=8)
 
-        if not products:
-            await callback.message.edit_text("📦 В этой категории пока нет активных продуктов.")
-            await callback.answer()
-            return
-
-        # Сохраняем выбранную категорию в state
-        await state.update_data(
-            category_id=category_id,
-            category_name=category.name
-        )
-        # 📊 Логируем выбор категории
-        log_category_selected(callback.from_user.id, category_id, category.name)
-
-        # Показываем продукты
-        await callback.message.edit_text(
-            f"📋 <b>Продукты категории: {category.name}</b>\n\n"
-            f"Выберите продукт:",
-            reply_markup=worker_products_kb(products),
-            parse_mode="HTML"
-        )
+    if not products_data:
+        await callback.message.edit_text("📦 В этой категории пока нет активных продуктов.")
         await callback.answer()
+        return
 
-        logger.info(f"Worker {callback.from_user.id} selected category {category_id} ({category.name})")
+    await state.update_data(category_id=category_id, category_name=category.name)
 
-    except Exception as e:
-        logger.exception(f"Error selecting category for worker {callback.from_user.id}: {e}")
-        await callback.answer("❌ Ошибка при загрузке продуктов", show_alert=True)
+    await callback.message.edit_text(
+        f"📋 <b>Продукты категории: {category.name}</b>\n\n"
+        f"🔝 Показаны топ-8 по наличию:\n"
+        f"Выберите продукт:",
+        reply_markup=worker_products_top_kb(products_data, category_id),
+        parse_mode="HTML"
+    )
+    await callback.answer()
 
 
 # ==================== Шаг 1б: Выбор продукта (Callback) ====================
@@ -237,6 +215,62 @@ async def select_worker_product(callback: CallbackQuery, session: AsyncSession, 
         logger.exception(f"Error selecting product for worker {callback.from_user.id}: {e}")
         await callback.answer("❌ Ошибка при обработке выбора", show_alert=True)
 
+@router.callback_query(F.data.startswith("worker_all_"))
+async def worker_show_all_products(callback: CallbackQuery, session: AsyncSession, state: FSMContext):
+    try:
+        category_id = int(callback.data.split("_")[2])
+    except:
+        await callback.answer("❌ Ошибка", show_alert=True)
+        return
+
+    products_data = await CategoryRepository.get_active_products_by_category_with_counts(session, category_id)
+
+    await callback.message.edit_text(
+        "📋 <b>Все товары категории</b>",
+        reply_markup=worker_products_kb(products_data),
+        parse_mode="HTML"
+    )
+    await callback.answer()
+
+@router.callback_query(F.data.startswith("worker_search_"))
+async def worker_start_search(callback: CallbackQuery, state: FSMContext):
+    try:
+        category_id = int(callback.data.split("_")[2])
+    except:
+        await callback.answer("❌ Ошибка", show_alert=True)
+        return
+
+    await state.update_data(search_category_id=category_id)
+    await state.set_state(WorkerUploadStates.waiting_for_search_query)  # добавьте состояние
+
+    await callback.message.edit_text("🔍 Введите название товара для поиска:")
+    await callback.answer()
+
+
+@router.message(WorkerUploadStates.waiting_for_search_query)
+async def worker_process_search(message: Message, state: FSMContext, session: AsyncSession):
+    query = message.text.strip().lower()
+    data = await state.get_data()
+    category_id = data.get("search_category_id")
+
+    if not category_id:
+        await message.answer("❌ Сессия устарела. Начните заново /worker")
+        await state.clear()
+        return
+
+    products_data = await CategoryRepository.get_active_products_by_category_with_counts(session, category_id)
+
+    filtered = [(p, cnt) for p, cnt in products_data if query in p.name.lower()]
+
+    if not filtered:
+        await message.answer("🔍 Ничего не найдено.")
+        return
+
+    await message.answer(
+        f"🔍 Найдено: {len(filtered)}",
+        reply_markup=worker_products_kb(filtered)
+    )
+    # состояние можно оставить или очистить — по желанию
 
 # ==================== Навигация: Назад к категориям ====================
 @router.callback_query(F.data == "worker_back_to_cats")

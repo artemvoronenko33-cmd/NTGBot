@@ -34,3 +34,10 @@ async def get_cart(tg_id: int) -> list:
 async def clear_cart(tg_id: int):
     """Очистить корзину"""
     await redis_client.delete(f"cart:{tg_id}")
+
+async def set_cart(user_id: int, cart_items: list):
+    key = f"cart:{user_id}"
+    if not cart_items:
+        await redis_client.delete(key)
+    else:
+        await redis_client.set(key, json.dumps(cart_items), ex=86400)  # 24 часа

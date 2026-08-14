@@ -2,6 +2,7 @@ import asyncio
 import logging
 import math
 import time
+from decimal import Decimal, ROUND_UP
 
 import httpx
 
@@ -88,6 +89,10 @@ def usd_to_crypto(amount_usd: float, price_usd: float, decimals: int = 8) -> flo
     """Конвертирует USD в crypto, округляя ВВЕРХ (защита от недоплаты)."""
     if price_usd <= 0:
         raise ValueError("Цена должна быть положительной")
-    raw = amount_usd / price_usd
-    factor = 10 ** decimals
-    return math.ceil(raw * factor) / factor
+    amount = Decimal(str(amount_usd))
+    price = Decimal(str(price_usd))
+    raw = amount / price
+
+    quant = Decimal("1").scaleb(-decimals)  # 0.00000001
+    result = raw.quantize(quant, rounding=ROUND_UP)
+    return float(result)

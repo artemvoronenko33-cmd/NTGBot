@@ -13,6 +13,7 @@ class WorkerUploadStates(StatesGroup):
     FSM нужна только для ожидания ZIP-архива.
     """
     waiting_for_zip = State()
+    waiting_for_search_query = State()  # ← новое
 
 class AdminStates(StatesGroup):
     waiting_for_add_worker_id = State()
@@ -24,3 +25,6 @@ class AdminImportStates(StatesGroup):
 
 class ProductSearchStates(StatesGroup):
     waiting_for_search_query = State()
+
+class OrderPaymentStates(StatesGroup):
+    waiting_for_currency = State()   # выбор монеты для оплаты заказа
